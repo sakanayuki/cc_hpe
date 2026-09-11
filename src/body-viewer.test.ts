@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import * as THREE from "three";
 import {
+  applyBodyProportions,
+  applyJointCorrection,
   captureRestPose,
   fitFrontProjection,
   landmarkToModel,
@@ -146,5 +148,117 @@ describe("front image/GLB projection alignment", () => {
     expect(fit.normalizedRmsError).toBeLessThan(0.01);
     expect(fit.pixelsPerWorldUnit).toBeGreaterThan(0);
     expect(fit.distance).toBeGreaterThan(0);
+  });
+});
+
+describe("rest-based body and joint editing", () => {
+  const makeSkeleton = () => {
+    const root = new THREE.Bone();
+    root.name = "mixamorig:Hips";
+    const add = (parent: THREE.Bone, name: string, x: number, y: number) => {
+      const bone = new THREE.Bone();
+      bone.name = name;
+      bone.position.set(x, y, 0);
+      parent.add(bone);
+      return bone;
+    };
+    for (const side of ["Left", "Right"] as const) {
+      const sign = side === "Left" ? -1 : 1;
+      const shoulder = add(root, `mixamorig:${side}Shoulder`, sign, 1);
+      const arm = add(shoulder, `mixamorig:${side}Arm`, sign, 0);
+      const forearm = add(arm, `mixamorig:${side}ForeArm`, sign, 0);
+      add(forearm, `mixamorig:${side}Hand`, sign, 0);
+      const thigh = add(root, `mixamorig:${side}UpLeg`, sign * 0.25, -1);
+      const shin = add(thigh, `mixamorig:${side}Leg`, 0, -1);
+      add(shin, `mixamorig:${side}Foot`, 0, -1);
+    }
+    return root;
+  };
+
+  it("distributes arm and leg lengths over all three left/right segments without changing the other limb", () => {
+    const model = makeSkeleton();
+    const rest = captureRestPose(model);
+    applyBodyProportions(model, rest, {
+      height: 1,
+      width: 1,
+      armLength: 1.5,
+      legLength: 1,
+    });
+    expect(
+      model.getObjectByName("mixamorig:LeftArm")!.position.length(),
+    ).toBeCloseTo(1.5);
+    expect(
+      model.getObjectByName("mixamorig:LeftForeArm")!.position.length(),
+    ).toBeCloseTo(1.5);
+    expect(
+      model.getObjectByName("mixamorig:RightHand")!.position.length(),
+    ).toBeCloseTo(1.5);
+    expect(
+      model.getObjectByName("mixamorig:LeftLeg")!.position.length(),
+    ).toBeCloseTo(1);
+    applyBodyProportions(model, rest, {
+      height: 1,
+      width: 1,
+      armLength: 1,
+      legLength: 1.25,
+    });
+    expect(
+      model.getObjectByName("mixamorig:LeftUpLeg")!.position.length(),
+    ).toBeCloseTo(Math.hypot(0.25, 1) * 1.25);
+    expect(
+      model.getObjectByName("mixamorig:RightFoot")!.position.length(),
+    ).toBeCloseTo(1.25);
+  });
+
+  it("rebuilds height and width from rest and reports missing segment bones", () => {
+    const model = makeSkeleton();
+    const rest = captureRestPose(model);
+    applyBodyProportions(model, rest, {
+      height: 1.2,
+      width: 0.8,
+      armLength: 1,
+      legLength: 1,
+    });
+    expect(model.scale.toArray()).toEqual([0.8, 1.2, 1]);
+    const hand = model.getObjectByName("mixamorig:RightHand")!;
+    hand.position.setScalar(99);
+    applyBodyProportions(model, rest, {
+      height: 1,
+      width: 1,
+      armLength: 1,
+      legLength: 1,
+    });
+    expect(hand.position.toArray()).toEqual(
+      rest.get(hand.name)!.localPosition.toArray(),
+    );
+    hand.removeFromParent();
+    expect(
+      applyBodyProportions(model, rest, {
+        height: 1,
+        width: 1,
+        armLength: 1,
+        legLength: 1,
+      }).missingBones,
+    ).toContain(hand.name);
+  });
+
+  it("propagates local translation to descendants and resets exactly to rest", () => {
+    const model = makeSkeleton();
+    const rest = captureRestPose(model);
+    const arm = model.getObjectByName("mixamorig:LeftArm")!;
+    const hand = model.getObjectByName("mixamorig:LeftHand")!;
+    const before = hand.getWorldPosition(new THREE.Vector3());
+    const saved = rest.get(arm.name)!;
+    applyJointCorrection(arm, saved.localPosition, saved.localQuaternion, {
+      rotation: new THREE.Euler(),
+      translation: new THREE.Vector3(0.1, 0.05, 0),
+    });
+    const propagated = hand.getWorldPosition(new THREE.Vector3()).sub(before);
+    expect(propagated.x).toBeCloseTo(0.1);
+    expect(propagated.y).toBeCloseTo(0.05);
+    expect(propagated.z).toBeCloseTo(0);
+    applyJointCorrection(arm, saved.localPosition, saved.localQuaternion);
+    expect(arm.position.toArray()).toEqual(saved.localPosition.toArray());
+    expect(Math.abs(arm.quaternion.dot(saved.localQuaternion))).toBeCloseTo(1);
   });
 });

@@ -32,9 +32,10 @@ app.innerHTML = `
           <label class="field"><span>体幅 <output id="bodyWidthOut">100%</output></span><input id="bodyWidth" type="range" min="70" max="140" value="100"/></label><label class="field"><span>身長比 <output id="bodyHeightOut">100%</output></span><input id="bodyHeight" type="range" min="80" max="120" value="100"/></label><label class="field"><span>腕の長さ <output id="armLengthOut">100%</output></span><input id="armLength" type="range" min="75" max="130" value="100"/></label><label class="field"><span>脚の長さ <output id="legLengthOut">100%</output></span><input id="legLength" type="range" min="75" max="130" value="100"/></label>
           <div id="poseQuality" class="pose-quality"></div>
           <label class="joint-field"><span>補正する関節</span><select id="joint">${EDITABLE_JOINTS.map((id) => `<option value="${id}">${JOINT_LABELS[id]}</option>`).join("")}</select></label>
-          <div class="joint-axes">${["X", "Y", "Z"].map((axis) => `<label><span>${axis} <output id="joint${axis}Out">0°</output></span><input id="joint${axis}" type="range" min="-90" max="90" value="0"/></label>`).join("")}</div>
-          <div class="edit-actions"><button id="resetJoint">選択関節を戻す</button><button id="resetPose">全姿勢を戻す</button></div>
-          <p>紫の関節をクリックして選択し、XYZを動かしてください。変更は即時反映されます。</p>
+          <h4>回転 XYZ（角度）</h4><div class="joint-axes">${["X", "Y", "Z"].map((axis) => `<label><span>${axis} <output id="jointR${axis}Out">0°</output></span><input id="jointR${axis}" type="range" min="-90" max="90" value="0"/></label>`).join("")}</div>
+          <h4>移動 XYZ（モデル単位）</h4><div class="joint-axes">${["X", "Y", "Z"].map((axis) => `<label><span>${axis} <output id="jointT${axis}Out">0.00</output></span><input id="jointT${axis}" type="range" min="-0.15" max="0.15" step="0.01" value="0"/></label>`).join("")}</div>
+          <div class="edit-actions"><button id="resetJoint">選択関節を戻す</button><button id="resetPose">回転・移動を全て戻す</button><button id="resetAll">体型を含む全補正を戻す</button></div>
+          <p>紫の関節をクリックして選択し、回転または親座標系での移動を調整してください。</p>
         </div>
         <div class="divider"></div>
         <div class="step"><span>02</span><div><b>3DGS化</b><small>素体のポーズ確認後に実行</small></div></div>
@@ -186,26 +187,43 @@ legLength.addEventListener("input", () => {
   applyLengths();
 });
 const applyJoint = () => {
-  const values = jointAxes.map((axis) =>
-    Number(byId<HTMLInputElement>(`joint${axis}`).value),
-  );
-  bodyViewer.setJointCorrection(jointId, values[0], values[1], values[2]);
+  const rotation = jointAxes.map((axis) =>
+    Number(byId<HTMLInputElement>(`jointR${axis}`).value),
+  ) as [number, number, number];
+  const translation = jointAxes.map((axis) =>
+    Number(byId<HTMLInputElement>(`jointT${axis}`).value),
+  ) as [number, number, number];
+  bodyViewer.setJointCorrection(jointId, rotation, translation);
 };
-jointAxes.forEach((axis) =>
-  byId<HTMLInputElement>(`joint${axis}`).addEventListener("input", (event) => {
-    byId<HTMLOutputElement>(`joint${axis}Out`).value =
+jointAxes.forEach((axis) => {
+  byId<HTMLInputElement>(`jointR${axis}`).addEventListener("input", (event) => {
+    byId<HTMLOutputElement>(`jointR${axis}Out`).value =
       `${(event.target as HTMLInputElement).value}°`;
     applyJoint();
-  }),
-);
+  });
+  byId<HTMLInputElement>(`jointT${axis}`).addEventListener("input", (event) => {
+    byId<HTMLOutputElement>(`jointT${axis}Out`).value = Number(
+      (event.target as HTMLInputElement).value,
+    ).toFixed(2);
+    applyJoint();
+  });
+});
 function syncJointControls() {
   const values = bodyViewer.getJointCorrection(jointId);
   jointAxes.forEach((axis, i) => {
-    byId<HTMLInputElement>(`joint${axis}`).value = String(
-      Math.round(values[i]),
+    const limit = jointId === "hips" ? "0.75" : "0.15";
+    byId<HTMLInputElement>(`jointR${axis}`).value = String(
+      Math.round(values.rotation[i]),
     );
-    byId<HTMLOutputElement>(`joint${axis}Out`).value =
-      `${Math.round(values[i])}°`;
+    byId<HTMLOutputElement>(`jointR${axis}Out`).value =
+      `${Math.round(values.rotation[i])}°`;
+    byId<HTMLInputElement>(`jointT${axis}`).min = `-${limit}`;
+    byId<HTMLInputElement>(`jointT${axis}`).max = limit;
+    byId<HTMLInputElement>(`jointT${axis}`).value = String(
+      values.translation[i],
+    );
+    byId<HTMLOutputElement>(`jointT${axis}Out`).value =
+      values.translation[i].toFixed(2);
   });
   bodyViewer.selectJoint(jointId);
 }
@@ -219,6 +237,17 @@ byId("resetJoint").addEventListener("click", () => {
 });
 byId("resetPose").addEventListener("click", () => {
   bodyViewer.resetPose();
+  syncJointControls();
+});
+byId("resetAll").addEventListener("click", () => {
+  bodyViewer.resetPose();
+  for (const input of [bodyWidth, bodyHeight, armLength, legLength]) {
+    input.value = "100";
+    byId<HTMLOutputElement>(`${input.id}Out`).value = "100%";
+  }
+  bodyViewer.setBodyWidth(1);
+  bodyViewer.setBodyHeight(1);
+  bodyViewer.setLimbLengths(1, 1);
   syncJointControls();
 });
 document

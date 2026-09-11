@@ -49,6 +49,113 @@ export type RestBone = {
   end: THREE.Vector3;
   worldDirection: THREE.Vector3;
 };
+export type BodyProportions = {
+  height: number;
+  width: number;
+  armLength: number;
+  legLength: number;
+};
+export type JointCorrection = {
+  rotation: THREE.Euler;
+  /** Translation in the bone's local (parent) coordinate system. */
+  translation: THREE.Vector3;
+};
+export type ProportionReport = {
+  missingBones: string[];
+  appliedSegments: number;
+};
+
+export const DEFAULT_PROPORTIONS: Readonly<BodyProportions> = {
+  height: 1,
+  width: 1,
+  armLength: 1,
+  legLength: 1,
+};
+
+const ARM_SEGMENT_ENDS = [
+  "mixamorig:LeftArm",
+  "mixamorig:LeftForeArm",
+  "mixamorig:LeftHand",
+  "mixamorig:RightArm",
+  "mixamorig:RightForeArm",
+  "mixamorig:RightHand",
+] as const;
+const LEG_SEGMENT_ENDS = [
+  "mixamorig:LeftUpLeg",
+  "mixamorig:LeftLeg",
+  "mixamorig:LeftFoot",
+  "mixamorig:RightUpLeg",
+  "mixamorig:RightLeg",
+  "mixamorig:RightFoot",
+] as const;
+
+/** Rebuilds every local offset from the immutable rest pose (never cumulatively). */
+export function applyBodyProportions(
+  model: THREE.Object3D,
+  rest: Map<string, RestBone>,
+  value: BodyProportions,
+  baseScale = 1,
+): ProportionReport {
+  const report: ProportionReport = { missingBones: [], appliedSegments: 0 };
+  model.scale.set(baseScale * value.width, baseScale * value.height, baseScale);
+  for (const [name, saved] of rest) {
+    const bone = model.getObjectByName(name);
+    if (bone) bone.position.copy(saved.localPosition);
+  }
+  for (const [names, scale] of [
+    [ARM_SEGMENT_ENDS, value.armLength],
+    [LEG_SEGMENT_ENDS, value.legLength],
+  ] as const) {
+    for (const name of names) {
+      const bone = model.getObjectByName(name);
+      const saved = rest.get(name);
+      if (!bone || !saved) report.missingBones.push(name);
+      else {
+        bone.position.copy(saved.localPosition).multiplyScalar(scale);
+        report.appliedSegments++;
+      }
+    }
+  }
+  model.updateWorldMatrix(true, true);
+  return report;
+}
+
+export function clampJointCorrection(id: JointId, correction: JointCorrection) {
+  const translationLimit = id === "hips" ? 0.75 : 0.15;
+  const clamp = (v: number, limit: number) =>
+    THREE.MathUtils.clamp(v, -limit, limit);
+  return {
+    rotation: new THREE.Euler(
+      clamp(correction.rotation.x, Math.PI / 2),
+      clamp(correction.rotation.y, Math.PI / 2),
+      clamp(correction.rotation.z, Math.PI / 2),
+      "XYZ",
+    ),
+    translation: new THREE.Vector3(
+      clamp(correction.translation.x, translationLimit),
+      clamp(correction.translation.y, translationLimit),
+      clamp(correction.translation.z, translationLimit),
+    ),
+  } satisfies JointCorrection;
+}
+
+/** Applies one correction from a supplied base transform, making reset exact. */
+export function applyJointCorrection(
+  bone: THREE.Object3D,
+  basePosition: THREE.Vector3,
+  baseQuaternion: THREE.Quaternion,
+  correction?: JointCorrection,
+) {
+  bone.position.copy(basePosition);
+  bone.quaternion.copy(baseQuaternion);
+  if (correction) {
+    bone.position.add(correction.translation);
+    bone.quaternion.multiply(
+      new THREE.Quaternion().setFromEuler(correction.rotation),
+    );
+  }
+  bone.updateWorldMatrix(true, true);
+}
 export const JOINT_LABELS: Record<JointId, string> = {
   hips: "腰",
   spine: "背骨",
@@ -417,15 +524,12 @@ export class BodyViewer {
   private raf = 0;
   private rest = new Map<string, RestBone>();
   private posed = new Map<string, THREE.Quaternion>();
-  private corrections = new Map<JointId, THREE.Euler>();
+  private correctionBasePositions = new Map<string, THREE.Vector3>();
+  private corrections = new Map<JointId, JointCorrection>();
   private helper = new THREE.Group();
-  private restPositions = new Map<string, THREE.Vector3>();
-  private heightScale = 1;
-  private armScale = 1;
-  private legScale = 1;
+  private proportions: BodyProportions = { ...DEFAULT_PROPORTIONS };
   private selected: JointId = "hips";
   private depthScale = 1;
-  private widthScale = 1;
   private imageSize?: Size;
   constructor(
     private host: HTMLElement,
@@ -482,9 +586,6 @@ export class BodyViewer {
     );
     this.model = gltf.scene;
     this.scene.add(this.model);
-    this.model.traverse((node) =>
-      this.restPositions.set(node.name, node.position.clone()),
-    );
     this.rest = captureRestPose(this.model);
   }
   private retarget() {
@@ -499,7 +600,7 @@ export class BodyViewer {
       const bone = this.model.getObjectByName(r.bone);
       if (bone) this.posed.set(r.bone, bone.quaternion.clone());
     }
-    this.applyCorrections();
+    this.applyProportionsAndCorrections();
   }
   private alignToImage() {
     if (!this.model || !this.pose || !this.imageSize) return;
@@ -567,75 +668,81 @@ export class BodyViewer {
     this.alignToImage();
   }
   setBodyWidth(v: number) {
-    this.widthScale = v;
-    this.applyProportions();
-    this.alignToImage();
+    this.proportions.width = v;
+    this.rebuildModel();
   }
   setBodyHeight(v: number) {
-    this.heightScale = v;
-    this.applyProportions();
-    this.alignToImage();
+    this.proportions.height = v;
+    this.rebuildModel();
   }
   setLimbLengths(arm: number, leg: number) {
-    this.armScale = arm;
-    this.legScale = leg;
-    this.applyProportions();
-    this.retarget();
+    this.proportions.armLength = arm;
+    this.proportions.legLength = leg;
+    this.rebuildModel();
+  }
+  private rebuildModel() {
+    this.retarget(); // fixed order: pose first, then rest-based proportions/corrections
     this.alignToImage();
   }
-  private applyProportions() {
+  private applyProportionsAndCorrections() {
     if (!this.model) return;
-    this.model.scale.set(
-      this.baseScale * this.widthScale,
-      this.baseScale * this.heightScale,
+    const hips = this.model.getObjectByName("mixamorig:Hips");
+    const savedHips = this.rest.get("mixamorig:Hips");
+    const poseOffset =
+      hips && savedHips
+        ? hips.position.clone().sub(savedHips.localPosition)
+        : new THREE.Vector3();
+    const proportionReport = applyBodyProportions(
+      this.model,
+      this.rest,
+      this.proportions,
       this.baseScale,
     );
-    for (const name of [
-      "mixamorig:LeftForeArm",
-      "mixamorig:LeftHand",
-      "mixamorig:RightForeArm",
-      "mixamorig:RightHand",
-    ]) {
-      const b = this.model.getObjectByName(name),
-        p = this.restPositions.get(name);
-      if (b && p) b.position.copy(p).multiplyScalar(this.armScale);
+    for (const name of proportionReport.missingBones)
+      if (!this.lastReport.missingBones.includes(name))
+        this.lastReport.missingBones.push(name);
+    if (hips) hips.position.add(poseOffset);
+    this.correctionBasePositions.clear();
+    for (const r of RULES) {
+      const bone = this.model.getObjectByName(r.bone);
+      if (bone) this.correctionBasePositions.set(r.bone, bone.position.clone());
     }
-    for (const name of [
-      "mixamorig:LeftLeg",
-      "mixamorig:LeftFoot",
-      "mixamorig:RightLeg",
-      "mixamorig:RightFoot",
-    ]) {
-      const b = this.model.getObjectByName(name),
-        p = this.restPositions.get(name);
-      if (b && p) b.position.copy(p).multiplyScalar(this.legScale);
-    }
-    this.model.updateWorldMatrix(true, true);
-    this.updateHelper();
+    this.applyCorrections();
   }
   selectJoint(id: JointId) {
     this.selected = id;
     this.updateHelper();
   }
   getJointCorrection(id: JointId) {
-    const e = this.corrections.get(id) ?? new THREE.Euler();
-    return [e.x, e.y, e.z].map(THREE.MathUtils.radToDeg) as [
-      number,
-      number,
-      number,
-    ];
+    const c = this.corrections.get(id) ?? {
+      rotation: new THREE.Euler(),
+      translation: new THREE.Vector3(),
+    };
+    return {
+      rotation: [c.rotation.x, c.rotation.y, c.rotation.z].map(
+        THREE.MathUtils.radToDeg,
+      ) as [number, number, number],
+      translation: c.translation.toArray() as [number, number, number],
+    };
   }
-  setJointCorrection(id: JointId, x: number, y: number, z: number) {
+  setJointCorrection(
+    id: JointId,
+    rotation: [number, number, number],
+    translation: [number, number, number],
+  ) {
     this.corrections.set(
       id,
-      new THREE.Euler(
-        ...([x, y, z].map(THREE.MathUtils.degToRad) as [
-          number,
-          number,
-          number,
-        ]),
-        "XYZ",
-      ),
+      clampJointCorrection(id, {
+        rotation: new THREE.Euler(
+          ...(rotation.map(THREE.MathUtils.degToRad) as [
+            number,
+            number,
+            number,
+          ]),
+          "XYZ",
+        ),
+        translation: new THREE.Vector3(...translation),
+      }),
     );
     this.applyCorrections();
     this.alignToImage();
@@ -643,10 +750,12 @@ export class BodyViewer {
   resetJoint(id: JointId) {
     this.corrections.delete(id);
     this.applyCorrections();
+    this.alignToImage();
   }
   resetPose() {
     this.corrections.clear();
     this.applyCorrections();
+    this.alignToImage();
   }
   private applyCorrections() {
     if (!this.model) return;
@@ -655,8 +764,13 @@ export class BodyViewer {
         q = this.posed.get(r.bone);
       if (!b || !q) continue;
       b.quaternion.copy(q);
-      const e = this.corrections.get(r.id);
-      if (e) b.quaternion.multiply(new THREE.Quaternion().setFromEuler(e));
+      const basePosition = this.correctionBasePositions.get(r.bone);
+      if (basePosition) b.position.copy(basePosition);
+      const c = this.corrections.get(r.id);
+      if (c) {
+        b.quaternion.multiply(new THREE.Quaternion().setFromEuler(c.rotation));
+        b.position.add(c.translation);
+      }
     }
     this.model.updateWorldMatrix(true, true);
     this.updateHelper();
@@ -718,6 +832,8 @@ export class BodyViewer {
   };
   captureDepth(size = 512) {
     if (!this.model) throw new Error("素体が読み込まれていません");
+    this.rebuildModel();
+    this.model.updateWorldMatrix(true, true);
     const box = new THREE.Box3().setFromObject(this.model),
       center = box.getCenter(new THREE.Vector3()),
       span =
@@ -794,8 +910,8 @@ export class BodyViewer {
     this.model.position.sub(center);
     this.baseScale = 2 / Math.max(size.x, size.y, size.z);
     this.model.scale.set(
-      this.baseScale * this.widthScale,
-      this.baseScale * this.heightScale,
+      this.baseScale * this.proportions.width,
+      this.baseScale * this.proportions.height,
       this.baseScale,
     );
     this.model.updateWorldMatrix(true, true);
