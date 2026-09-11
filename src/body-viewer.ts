@@ -30,6 +30,19 @@ type Rule = {
   to: number[];
   child?: string;
 };
+export type RetargetReport = {
+  appliedBones: number;
+  missingBones: string[];
+  skippedBones: string[];
+};
+export type RestBone = {
+  localPosition: THREE.Vector3;
+  localQuaternion: THREE.Quaternion;
+  worldQuaternion: THREE.Quaternion;
+  start: THREE.Vector3;
+  end: THREE.Vector3;
+  worldDirection: THREE.Vector3;
+};
 export const JOINT_LABELS: Record<JointId, string> = {
   hips: "腰",
   spine: "背骨",
@@ -51,7 +64,9 @@ export const JOINT_LABELS: Record<JointId, string> = {
   rightLowerLeg: "右すね",
   rightFoot: "右足",
 };
-const RULES: Rule[] = [
+// This is deliberately a parent-before-child traversal.  The retargeter relies
+// on every parent's world quaternion having been finalised before its child.
+export const RULES: readonly Rule[] = [
   {
     id: "hips",
     bone: "mixamorig:Hips",
@@ -158,11 +173,35 @@ const RULES: Rule[] = [
 ];
 export const EDITABLE_JOINTS = RULES.map((r) => r.id);
 
+const MIN_VISIBILITY = 0.45;
+const EPSILON = 1e-6;
+
+/** The only MediaPipe -> Three/GLB coordinate-system boundary. */
+export function landmarkToModel(
+  landmark: { x: number; y: number; z: number },
+  depthScale = 1,
+) {
+  // MediaPipe image Y is down and its camera looks toward -Z.  The GLB is
+  // authored X-right, Y-up, Z-front, so both Y and Z are inverted here.
+  return new THREE.Vector3(landmark.x, -landmark.y, -landmark.z * depthScale);
+}
+
+function usable(indices: number[], pose: PoseGuidance) {
+  return indices.every((i) => {
+    const p = pose.worldLandmarks[i];
+    return (
+      p &&
+      Number.isFinite(p.x + p.y + p.z) &&
+      (p.visibility ?? 1) >= MIN_VISIBILITY
+    );
+  });
+}
+
 function average(indices: number[], pose: PoseGuidance, depthScale: number) {
   const v = new THREE.Vector3();
   for (const i of indices) {
     const p = pose.worldLandmarks[i];
-    v.add(new THREE.Vector3(p.x, -p.y, -p.z * depthScale));
+    v.add(landmarkToModel(p, depthScale));
   }
   return v.multiplyScalar(1 / indices.length);
 }
@@ -172,9 +211,132 @@ export function poseDirection(
   pose: PoseGuidance,
   depthScale = 1,
 ) {
-  return average(to, pose, depthScale)
-    .sub(average(from, pose, depthScale))
-    .normalize();
+  const direction = average(to, pose, depthScale).sub(
+    average(from, pose, depthScale),
+  );
+  return direction.lengthSq() > EPSILON ? direction.normalize() : direction;
+}
+
+export function captureRestPose(model: THREE.Object3D) {
+  const result = new Map<string, RestBone>();
+  model.updateWorldMatrix(true, true);
+  for (const rule of RULES) {
+    const bone = model.getObjectByName(rule.bone);
+    if (!bone) continue;
+    const child = rule.child
+      ? model.getObjectByName(rule.child)
+      : bone.children.find((node) => (node as THREE.Bone).isBone);
+    const start = bone.getWorldPosition(new THREE.Vector3());
+    const end = child?.getWorldPosition(new THREE.Vector3()) ?? start.clone();
+    result.set(rule.bone, {
+      localPosition: bone.position.clone(),
+      localQuaternion: bone.quaternion.clone(),
+      worldQuaternion: bone.getWorldQuaternion(new THREE.Quaternion()),
+      start,
+      end,
+      worldDirection: end.clone().sub(start).normalize(),
+    });
+  }
+  return result;
+}
+
+function torsoFrame(pose: PoseGuidance, depthScale: number) {
+  if (!usable([11, 12, 23, 24], pose)) return undefined;
+  const hips = average([23, 24], pose, depthScale);
+  const shoulders = average([11, 12], pose, depthScale);
+  const right = average([12], pose, depthScale).sub(
+    average([11], pose, depthScale),
+  );
+  const up = shoulders.sub(hips);
+  if (right.lengthSq() <= EPSILON || up.lengthSq() <= EPSILON) return undefined;
+  right.normalize();
+  const front = right.clone().cross(up).normalize();
+  if (front.lengthSq() <= EPSILON) return undefined;
+  const correctedUp = front.clone().cross(right).normalize();
+  return new THREE.Quaternion().setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(right, correctedUp, front),
+  );
+}
+
+/** Retargets from immutable rest data and is intentionally usable in unit tests. */
+export function retargetSkeleton(
+  model: THREE.Object3D,
+  pose: PoseGuidance,
+  rest: Map<string, RestBone>,
+  depthScale = 1,
+): RetargetReport {
+  const report: RetargetReport = {
+    appliedBones: 0,
+    missingBones: [],
+    skippedBones: [],
+  };
+  const bodyFrame = torsoFrame(pose, depthScale);
+  const torsoIds = new Set<JointId>(["hips", "spine", "chest"]);
+
+  // Always reset the whole chain first: repeated calls must never accumulate.
+  for (const rule of RULES) {
+    const bone = model.getObjectByName(rule.bone);
+    const saved = rest.get(rule.bone);
+    if (bone && saved) {
+      bone.quaternion.copy(saved.localQuaternion);
+      bone.position.copy(saved.localPosition);
+    }
+  }
+  model.updateWorldMatrix(true, true);
+
+  for (const rule of RULES) {
+    const bone = model.getObjectByName(rule.bone);
+    const saved = rest.get(rule.bone);
+    if (!bone || !saved) {
+      report.missingBones.push(rule.bone);
+      continue;
+    }
+    let desiredWorld: THREE.Quaternion | undefined;
+    if (torsoIds.has(rule.id) && bodyFrame) {
+      // Rest GLB axes are inferred once from its front/up convention.  The
+      // target body frame carries root yaw/roll, torso lean and shoulder tilt.
+      const restUp = saved.worldDirection;
+      const restRight = new THREE.Vector3(1, 0, 0).applyQuaternion(
+        saved.worldQuaternion,
+      );
+      const restFront = restRight.clone().cross(restUp).normalize();
+      const restFrame = new THREE.Quaternion().setFromRotationMatrix(
+        new THREE.Matrix4().makeBasis(restRight, restUp, restFront),
+      );
+      desiredWorld = bodyFrame
+        .clone()
+        .multiply(restFrame.invert())
+        .multiply(saved.worldQuaternion);
+    } else if (usable([...rule.from, ...rule.to], pose)) {
+      const target = poseDirection(rule.from, rule.to, pose, depthScale);
+      if (
+        target.lengthSq() > EPSILON &&
+        saved.worldDirection.lengthSq() > EPSILON
+      )
+        desiredWorld = new THREE.Quaternion()
+          .setFromUnitVectors(saved.worldDirection, target)
+          .multiply(saved.worldQuaternion);
+    }
+    if (!desiredWorld) {
+      // Keeping the restored local rotation safely inherits the final parent.
+      report.skippedBones.push(rule.bone);
+      model.updateWorldMatrix(true, true);
+      continue;
+    }
+    const parentWorld =
+      bone.parent?.getWorldQuaternion(new THREE.Quaternion()) ??
+      new THREE.Quaternion();
+    bone.quaternion.copy(parentWorld.invert().multiply(desiredWorld));
+    model.updateWorldMatrix(true, true);
+    report.appliedBones++;
+  }
+  const hips = model.getObjectByName("mixamorig:Hips");
+  if (hips && usable([23, 24], pose)) {
+    const center = average([23, 24], pose, depthScale);
+    hips.position.add(center);
+  }
+  model.updateWorldMatrix(true, true);
+  return report;
 }
 
 export class BodyViewer {
@@ -186,7 +348,7 @@ export class BodyViewer {
   private pose?: PoseGuidance;
   private baseScale = 1;
   private raf = 0;
-  private rest = new Map<string, { q: THREE.Quaternion; dir: THREE.Vector3 }>();
+  private rest = new Map<string, RestBone>();
   private posed = new Map<string, THREE.Quaternion>();
   private corrections = new Map<JointId, THREE.Euler>();
   private helper = new THREE.Group();
@@ -222,14 +384,20 @@ export class BodyViewer {
     new ResizeObserver(() => this.resize()).observe(host);
     this.loop();
   }
-  async showPose(pose: PoseGuidance, depthScale = 1) {
+  async showPose(pose: PoseGuidance, depthScale = 1): Promise<RetargetReport> {
     await this.ensureModel();
     this.pose = pose;
     this.depthScale = depthScale;
     this.corrections.clear();
-    this.retarget();
     this.fit();
+    this.retarget();
+    return this.lastReport;
   }
+  private lastReport: RetargetReport = {
+    appliedBones: 0,
+    missingBones: [],
+    skippedBones: [],
+  };
   private async ensureModel() {
     if (this.model) return;
     const gltf = await new GLTFLoader().loadAsync(
@@ -240,56 +408,19 @@ export class BodyViewer {
     this.model.traverse((node) =>
       this.restPositions.set(node.name, node.position.clone()),
     );
-    this.model.updateWorldMatrix(true, true);
-    for (const r of RULES) {
-      const b = this.model.getObjectByName(r.bone) as THREE.Bone | undefined;
-      if (!b) continue;
-      const child = (
-        r.child
-          ? this.model.getObjectByName(r.child)
-          : b.children.find((x) => (x as THREE.Bone).isBone)
-      ) as THREE.Object3D | undefined;
-      const a = new THREE.Vector3(),
-        z = new THREE.Vector3();
-      b.getWorldPosition(a);
-      child?.getWorldPosition(z);
-      this.rest.set(r.bone, {
-        q: b.quaternion.clone(),
-        dir: z.sub(a).normalize(),
-      });
-    }
+    this.rest = captureRestPose(this.model);
   }
   private retarget() {
     if (!this.model || !this.pose) return;
+    this.lastReport = retargetSkeleton(
+      this.model,
+      this.pose,
+      this.rest,
+      this.depthScale,
+    );
     for (const r of RULES) {
-      const bone = this.model.getObjectByName(r.bone) as THREE.Bone | undefined,
-        rest = this.rest.get(r.bone);
-      if (!bone || !rest) continue;
-      bone.quaternion.copy(rest.q);
-      this.model.updateWorldMatrix(true, true);
-      const parentQ = new THREE.Quaternion();
-      bone.parent?.getWorldQuaternion(parentQ);
-      const origin = new THREE.Vector3(),
-        tip = new THREE.Vector3();
-      bone.getWorldPosition(origin);
-      const child: THREE.Object3D | undefined = r.child
-        ? this.model.getObjectByName(r.child)
-        : undefined;
-      const restWorld = child
-        ? (child.getWorldPosition(tip), tip.sub(origin).normalize())
-        : rest.dir.clone();
-      const target = poseDirection(r.from, r.to, this.pose, this.depthScale);
-      const deltaWorld = new THREE.Quaternion().setFromUnitVectors(
-        restWorld,
-        target,
-      );
-      const localDelta = parentQ
-        .clone()
-        .invert()
-        .multiply(deltaWorld)
-        .multiply(parentQ);
-      bone.quaternion.premultiply(localDelta);
-      this.posed.set(r.bone, bone.quaternion.clone());
+      const bone = this.model.getObjectByName(r.bone);
+      if (bone) this.posed.set(r.bone, bone.quaternion.clone());
     }
     this.applyCorrections();
   }
