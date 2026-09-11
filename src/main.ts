@@ -307,7 +307,10 @@ estimate.addEventListener("click", async () => {
   try {
     pose = await detectSinglePerson(sourceImage);
     drawPoseOverlay(pose);
-    await bodyViewer.showPose(pose, Number(poseDepth.value) / 100);
+    const application = await bodyViewer.showPose(
+      pose,
+      Number(poseDepth.value) / 100,
+    );
     bodyViewer.setVisible(true);
     viewer.setVisible(false);
     syncJointControls();
@@ -321,9 +324,11 @@ estimate.addEventListener("click", async () => {
     ).length;
     byId("poseQuality").textContent =
       `33関節を推定 · 高信頼 ${visible}/33 · 紫の骨格を写真上に表示`;
-    generate.disabled = false;
-    status.textContent =
-      "素体を回転し、紫の関節をクリックして姿勢を確認・補正してください";
+    generate.disabled = application.appliedBones === 0;
+    const result = `姿勢推定成功 · GLB適用 ${application.appliedBones}ボーン · 欠落 ${application.missingBones.length}ボーン`;
+    status.textContent = application.missingBones.length
+      ? `${result}（${application.missingBones.join("、")}）`
+      : `${result} · 素体を回転して姿勢を確認・補正してください`;
   } catch (error) {
     pose = undefined;
     status.textContent =
