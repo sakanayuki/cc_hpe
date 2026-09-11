@@ -4,6 +4,7 @@ import { download, exportPly, exportSplat, exportSpz } from "./exporters";
 import { SplatViewer, type RenderMode } from "./viewer";
 import { detectSinglePerson } from "./pose";
 import type { PoseGuidance } from "./pose";
+import { getContainRect, mapLandmarkToContain } from "./pose-overlay";
 import {
   BodyViewer,
   EDITABLE_JOINTS,
@@ -218,13 +219,18 @@ const SKELETON = [
 ];
 function drawPoseOverlay(guidance: PoseGuidance) {
   const canvas = byId<HTMLCanvasElement>("poseOverlay"),
-    thumb = byId<HTMLImageElement>("thumb");
-  canvas.width = thumb.clientWidth * devicePixelRatio;
-  canvas.height = thumb.clientHeight * devicePixelRatio;
+    thumbWrap = byId<HTMLDivElement>("thumbWrap");
+  const w = thumbWrap.clientWidth,
+    h = thumbWrap.clientHeight;
+  canvas.width = Math.round(w * devicePixelRatio);
+  canvas.height = Math.round(h * devicePixelRatio);
   const c = canvas.getContext("2d")!;
   c.scale(devicePixelRatio, devicePixelRatio);
-  const w = thumb.clientWidth,
-    h = thumb.clientHeight;
+  if (!sourceImage) return;
+  const imageRect = getContainRect(
+    { width: sourceImage.naturalWidth, height: sourceImage.naturalHeight },
+    { width: w, height: h },
+  );
   c.strokeStyle = "#c7a8ff";
   c.lineWidth = 2;
   c.fillStyle = "#ff9bd2";
@@ -232,17 +238,25 @@ function drawPoseOverlay(guidance: PoseGuidance) {
     const p = guidance.landmarks[a],
       q = guidance.landmarks[b];
     c.beginPath();
-    c.moveTo(p.x * w, p.y * h);
-    c.lineTo(q.x * w, q.y * h);
+    const start = mapLandmarkToContain(p, imageRect),
+      end = mapLandmarkToContain(q, imageRect);
+    c.moveTo(start.x, start.y);
+    c.lineTo(end.x, end.y);
     c.stroke();
   }
   for (const p of guidance.landmarks) {
     if ((p.visibility ?? 1) < 0.3) continue;
     c.beginPath();
-    c.arc(p.x * w, p.y * h, 2.5, 0, Math.PI * 2);
+    const point = mapLandmarkToContain(p, imageRect);
+    c.arc(point.x, point.y, 2.5, 0, Math.PI * 2);
     c.fill();
   }
 }
+
+const thumbnailResizeObserver = new ResizeObserver(() => {
+  if (pose) drawPoseOverlay(pose);
+});
+thumbnailResizeObserver.observe(byId("thumbWrap"));
 
 async function loadFile(file: File): Promise<void> {
   if (file.size > 25 * 1024 * 1024) {
@@ -257,6 +271,10 @@ async function loadFile(file: File): Promise<void> {
     await image.decode();
     sourceImage = image;
     pose = undefined;
+    byId<HTMLDivElement>("thumbWrap").style.setProperty(
+      "--image-aspect",
+      `${image.naturalWidth} / ${image.naturalHeight}`,
+    );
     byId<HTMLImageElement>("thumb").src = url;
     byId("thumbWrap").classList.remove("hidden");
     byId("poseControls").classList.add("hidden");
