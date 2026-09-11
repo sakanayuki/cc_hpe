@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as THREE from "three";
 import {
   captureRestPose,
+  fitFrontProjection,
   landmarkToModel,
   poseDirection,
   retargetSkeleton,
@@ -118,5 +119,32 @@ describe("GLB pose retargeting", () => {
     retargetSkeleton(hips, p, rest);
     expect(Math.abs(hips.quaternion.dot(onceQ))).toBeCloseTo(1);
     expect(hips.position.distanceTo(onceP)).toBeCloseTo(0);
+  });
+});
+
+describe("front image/GLB projection alignment", () => {
+  it("minimizes major-joint reprojection error relative to image diagonal", () => {
+    // shoulders, hips and feet in model space, transformed into a 9:16 photo.
+    const model = [
+      { x: -0.5, y: 1 },
+      { x: 0.5, y: 1 },
+      { x: -0.3, y: 0 },
+      { x: 0.3, y: 0 },
+      { x: -0.25, y: -1.5 },
+      { x: 0.25, y: -1.5 },
+    ];
+    const image = model.map((p) => ({
+      x: (p.x * 240 + 450) / 900,
+      y: (-p.y * 240 + 760) / 1600,
+    }));
+    const fit = fitFrontProjection(
+      model,
+      image,
+      { width: 900, height: 1600 },
+      { width: 800, height: 500 },
+    );
+    expect(fit.normalizedRmsError).toBeLessThan(0.01);
+    expect(fit.pixelsPerWorldUnit).toBeGreaterThan(0);
+    expect(fit.distance).toBeGreaterThan(0);
   });
 });

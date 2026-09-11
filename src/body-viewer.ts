@@ -2,6 +2,12 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { PoseGuidance } from "./pose";
+import {
+  getContainRect,
+  mapLandmarkToContain,
+  type Point,
+  type Size,
+} from "./pose-overlay";
 
 export type JointId =
   | "hips"
@@ -175,6 +181,67 @@ export const EDITABLE_JOINTS = RULES.map((r) => r.id);
 
 const MIN_VISIBILITY = 0.45;
 const EPSILON = 1e-6;
+
+export type FrontAlignment = {
+  target: Point;
+  pixelsPerWorldUnit: number;
+  distance: number;
+  normalizedRmsError: number;
+};
+
+/** Least-squares front-view fit (translation + uniform camera zoom). */
+export function fitFrontProjection(
+  modelPoints: Point[],
+  imagePoints: Point[],
+  imageSize: Size,
+  viewport: Size,
+  verticalFovDegrees = 36,
+): FrontAlignment {
+  if (modelPoints.length !== imagePoints.length || modelPoints.length < 2)
+    throw new Error("正面位置合わせには2点以上の対応点が必要です");
+  const rect = getContainRect(imageSize, viewport);
+  const pixels = imagePoints.map((point) => mapLandmarkToContain(point, rect));
+  const mean = (values: Point[]) =>
+    values.reduce((sum, p) => ({ x: sum.x + p.x, y: sum.y + p.y }), {
+      x: 0,
+      y: 0,
+    });
+  const mc = mean(modelPoints),
+    pc = mean(pixels),
+    n = modelPoints.length;
+  mc.x /= n;
+  mc.y /= n;
+  pc.x /= n;
+  pc.y /= n;
+  let numerator = 0,
+    denominator = 0;
+  for (let i = 0; i < n; i++) {
+    const mx = modelPoints[i].x - mc.x,
+      my = modelPoints[i].y - mc.y;
+    numerator += mx * (pixels[i].x - pc.x) + my * (pc.y - pixels[i].y);
+    denominator += mx * mx + my * my;
+  }
+  const scale = Math.max(EPSILON, numerator / Math.max(EPSILON, denominator));
+  const target = {
+    x: mc.x - (pc.x - viewport.width / 2) / scale,
+    y: mc.y + (pc.y - viewport.height / 2) / scale,
+  };
+  let squaredError = 0;
+  for (let i = 0; i < n; i++) {
+    const x = viewport.width / 2 + (modelPoints[i].x - target.x) * scale;
+    const y = viewport.height / 2 - (modelPoints[i].y - target.y) * scale;
+    squaredError += (x - pixels[i].x) ** 2 + (y - pixels[i].y) ** 2;
+  }
+  return {
+    target,
+    pixelsPerWorldUnit: scale,
+    distance:
+      viewport.height /
+      (2 * scale * Math.tan(THREE.MathUtils.degToRad(verticalFovDegrees / 2))),
+    normalizedRmsError:
+      Math.sqrt(squaredError / n) / Math.hypot(rect.width, rect.height),
+  };
+}
 
 /** The only MediaPipe -> Three/GLB coordinate-system boundary. */
 export function landmarkToModel(
@@ -359,9 +426,11 @@ export class BodyViewer {
   private selected: JointId = "hips";
   private depthScale = 1;
   private widthScale = 1;
+  private imageSize?: Size;
   constructor(
     private host: HTMLElement,
     private onSelect?: (id: JointId) => void,
+    private onAngle?: (degrees: number) => void,
   ) {
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -369,13 +438,15 @@ export class BodyViewer {
       preserveDrawingBuffer: true,
     });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    this.renderer.setClearColor(0x121018, 1);
+    this.renderer.setClearColor(0x000000, 0);
+    this.renderer.domElement.classList.add("body-canvas");
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     host.append(this.renderer.domElement);
     this.camera.position.set(0, 0.05, 3.4);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.target.set(0, 0, 0);
+    this.controls.addEventListener("change", this.reportAngle);
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x24182f, 2.4));
     const light = new THREE.DirectionalLight(0xffffff, 3);
     light.position.set(2, 4, 3);
@@ -384,13 +455,19 @@ export class BodyViewer {
     new ResizeObserver(() => this.resize()).observe(host);
     this.loop();
   }
-  async showPose(pose: PoseGuidance, depthScale = 1): Promise<RetargetReport> {
+  async showPose(
+    pose: PoseGuidance,
+    depthScale = 1,
+    imageSize?: Size,
+  ): Promise<RetargetReport> {
     await this.ensureModel();
     this.pose = pose;
     this.depthScale = depthScale;
+    this.imageSize = imageSize;
     this.corrections.clear();
     this.fit();
     this.retarget();
+    this.alignToImage();
     return this.lastReport;
   }
   private lastReport: RetargetReport = {
@@ -424,23 +501,87 @@ export class BodyViewer {
     }
     this.applyCorrections();
   }
+  private alignToImage() {
+    if (!this.model || !this.pose || !this.imageSize) return;
+    const pairs: Array<[number, string]> = [
+      [11, "mixamorig:LeftArm"],
+      [12, "mixamorig:RightArm"],
+      [23, "mixamorig:LeftUpLeg"],
+      [24, "mixamorig:RightUpLeg"],
+      [25, "mixamorig:LeftLeg"],
+      [26, "mixamorig:RightLeg"],
+      [27, "mixamorig:LeftFoot"],
+      [28, "mixamorig:RightFoot"],
+    ];
+    const usablePairs = pairs.filter(
+      ([i, name]) =>
+        this.model!.getObjectByName(name) &&
+        (this.pose!.landmarks[i].visibility ?? 1) >= MIN_VISIBILITY,
+    );
+    if (usablePairs.length < 2) return;
+    this.model.updateWorldMatrix(true, true);
+    const world = usablePairs.map(([, name]) => {
+      const p = this.model!.getObjectByName(name)!.getWorldPosition(
+        new THREE.Vector3(),
+      );
+      return { x: p.x, y: p.y };
+    });
+    const image = usablePairs.map(([i]) => this.pose!.landmarks[i]);
+    const result = fitFrontProjection(
+      world,
+      image,
+      this.imageSize,
+      {
+        width: this.host.clientWidth,
+        height: this.host.clientHeight,
+      },
+      this.camera.fov,
+    );
+    const z = new THREE.Box3()
+      .setFromObject(this.model)
+      .getCenter(new THREE.Vector3()).z;
+    // Keep the subject on the front projection plane; camera target handles
+    // the fitted 2D translation while distance supplies the fitted zoom.
+    this.model.position.z -= z;
+    this.model.updateWorldMatrix(true, true);
+    this.controls.target.set(result.target.x, result.target.y, 0);
+    this.camera.zoom = 1;
+    this.camera.updateProjectionMatrix();
+    this.camera.position.set(result.target.x, result.target.y, result.distance);
+    this.controls.update();
+  }
+  private reportAngle = () => {
+    const direction = this.camera.position
+      .clone()
+      .sub(this.controls.target)
+      .normalize();
+    this.onAngle?.(
+      THREE.MathUtils.radToDeg(
+        Math.acos(THREE.MathUtils.clamp(direction.z, -1, 1)),
+      ),
+    );
+  };
   setDepthScale(v: number) {
     this.depthScale = v;
     this.retarget();
+    this.alignToImage();
   }
   setBodyWidth(v: number) {
     this.widthScale = v;
     this.applyProportions();
+    this.alignToImage();
   }
   setBodyHeight(v: number) {
     this.heightScale = v;
     this.applyProportions();
+    this.alignToImage();
   }
   setLimbLengths(arm: number, leg: number) {
     this.armScale = arm;
     this.legScale = leg;
     this.applyProportions();
     this.retarget();
+    this.alignToImage();
   }
   private applyProportions() {
     if (!this.model) return;
@@ -497,6 +638,7 @@ export class BodyViewer {
       ),
     );
     this.applyCorrections();
+    this.alignToImage();
   }
   resetJoint(id: JointId) {
     this.corrections.delete(id);
@@ -626,14 +768,18 @@ export class BodyViewer {
     return result;
   }
   setView(view: "front" | "side" | "back" | "top") {
+    if (view === "front" && this.imageSize) {
+      this.alignToImage();
+      return;
+    }
     const p = {
       front: [0, 0.05, 3.4],
       side: [3.4, 0.05, 0],
       back: [0, 0.05, -3.4],
       top: [0, 3.4, 0.01],
     }[view];
-    this.camera.position.set(...(p as [number, number, number]));
-    this.controls.target.set(0, 0, 0);
+    const target = this.controls.target.clone();
+    this.camera.position.set(target.x + p[0], target.y + p[1], target.z + p[2]);
     this.controls.update();
   }
   reset() {
@@ -663,6 +809,7 @@ export class BodyViewer {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h, false);
+    if (this.pose && this.imageSize) this.alignToImage();
   }
   private loop = () => {
     this.controls.update();

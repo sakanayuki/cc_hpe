@@ -46,3 +46,16 @@ export function mapLandmarkToContain(point: Point, rect: ContainRect): Point {
     y: rect.y + point.y * rect.height,
   };
 }
+
+/** Maps a landmark to WebGL NDC through the shared object-fit contain area. */
+export function mapLandmarkToViewer(
+  point: Point,
+  source: Size,
+  viewport: Size,
+): Point {
+  const pixel = mapLandmarkToContain(point, getContainRect(source, viewport));
+  return {
+    x: (pixel.x / viewport.width) * 2 - 1,
+    y: 1 - (pixel.y / viewport.height) * 2,
+  };
+}
