@@ -321,9 +321,27 @@ main {
   overflow: hidden;
 }
 .viewer canvas {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   display: block;
+  z-index: 2;
+}
+.reference-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0.45;
+  z-index: 1;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.body-canvas {
+  /* Model is layer 2; joint helpers use renderOrder 9/10 inside this canvas. */
+  z-index: 2;
 }
 .empty {
   position: absolute;
@@ -332,7 +350,7 @@ main {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  z-index: 1;
+  z-index: 3;
   color: #dad2e2;
   pointer-events: none;
 }
@@ -371,6 +389,7 @@ main {
   padding: 7px 12px;
   border-radius: 999px;
   font-size: 10px;
+  z-index: 4;
 }
 .viewer-footer {
   height: 42px;
@@ -507,6 +526,22 @@ kbd {
 }
 .pose-controls .field {
   margin: 13px 0;
+}
+.reference-controls {
+  margin-top: 12px;
+  padding: 9px;
+  border-radius: 9px;
+  background: #211b2b;
+  color: #cdbbff;
+  font-size: 10px;
+}
+.reference-controls > label:first-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.reference-controls .field {
+  margin-bottom: 0;
 }
 .pose-controls p {
   font-size: 9px;

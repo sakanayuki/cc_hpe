@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { getContainRect, mapLandmarkToContain } from "./pose-overlay";
+import {
+  getContainRect,
+  mapLandmarkToContain,
+  mapLandmarkToViewer,
+} from "./pose-overlay";
 
 const display = { width: 300, height: 500 };
 
@@ -23,4 +27,15 @@ describe.each([
     expect(rect.width).toBeLessThanOrEqual(display.width);
     expect(rect.height).toBeLessThanOrEqual(display.height);
   });
+});
+
+it("uses the portrait contain area for viewer coordinates", () => {
+  const viewport = { width: 800, height: 500 };
+  const source = { width: 900, height: 1600 };
+  const topLeft = mapLandmarkToViewer({ x: 0, y: 0 }, source, viewport);
+  const bottomRight = mapLandmarkToViewer({ x: 1, y: 1 }, source, viewport);
+  expect(topLeft.x).toBeCloseTo(-0.3515625);
+  expect(topLeft.y).toBe(1);
+  expect(bottomRight.x).toBeCloseTo(0.3515625);
+  expect(bottomRight.y).toBe(-1);
 });
