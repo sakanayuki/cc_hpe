@@ -2,9 +2,13 @@ import { FilesetResolver, PoseLandmarker, type NormalizedLandmark } from '@media
 
 export interface PoseGuidance {
   landmarks: NormalizedLandmark[];
+  worldLandmarks: NormalizedLandmark[];
   mask: Float32Array;
   maskWidth: number;
   maskHeight: number;
+  rigDepth?: Float32Array;
+  rigDepthWidth?: number;
+  rigDepthHeight?: number;
 }
 
 let instance: Promise<PoseLandmarker> | undefined;
@@ -28,8 +32,10 @@ export async function detectSinglePerson(image: HTMLImageElement): Promise<PoseG
   if (result.landmarks.length !== 1) throw new Error('複数の人物を検出しました。人物が1人だけの写真を選択してください。');
   const segmentation = result.segmentationMasks?.[0];
   if (!segmentation) throw new Error('人物マスクを生成できませんでした。');
+  if (!result.worldLandmarks[0]) throw new Error('人物の3D骨格を推定できませんでした。');
   const guidance = {
     landmarks: result.landmarks[0].map((point) => ({ ...point })),
+    worldLandmarks: result.worldLandmarks[0].map((point) => ({ ...point })),
     mask: new Float32Array(segmentation.getAsFloat32Array()),
     maskWidth: segmentation.width,
     maskHeight: segmentation.height,

@@ -20,6 +20,7 @@
   "devDependencies": {
     "@types/node": "^22.20.2",
     "@types/three": "^0.180.0",
+    "fbx2gltf": "^0.9.7-p1",
     "typescript": "^5.9.2",
     "vite": "^7.1.5",
     "vitest": "^3.2.4"

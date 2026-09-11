@@ -20,4 +20,18 @@ for (const asset of assets) {
   await stat(join(root.pathname, relative));
 }
 
-console.log(`Verified ${assets.length} same-origin Pages assets at ${expectedBase}`);
+const glb = await readFile(new URL('runtime/body.glb', root));
+if (glb.length < 1_000_000 || glb.subarray(0, 4).toString('ascii') !== 'glTF') {
+  throw new Error('The rigged body was not converted to a valid binary glTF asset');
+}
+const jsonLength = glb.readUInt32LE(12);
+const gltf = JSON.parse(glb.subarray(20, 20 + jsonLength).toString('utf8'));
+const nodeNames = new Set(gltf.nodes?.map((node) => node.name));
+for (const bone of ['mixamorig:Hips', 'mixamorig:Spine2', 'mixamorig:LeftArm', 'mixamorig:RightArm', 'mixamorig:LeftUpLeg', 'mixamorig:RightUpLeg']) {
+  if (!nodeNames.has(bone)) throw new Error(`Required rig bone is missing from GLB: ${bone}`);
+}
+if (!gltf.skins?.length) throw new Error('Converted body GLB does not contain a skin');
+const model = await stat(new URL('runtime/models/pose_landmarker_full.task', root));
+if (model.size !== 9_398_198) throw new Error(`Unexpected pose model size: ${model.size}`);
+
+console.log(`Verified Pages assets, pose model, and ${glb.length}-byte rigged body GLB at ${expectedBase}`);

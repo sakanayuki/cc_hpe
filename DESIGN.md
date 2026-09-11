@@ -453,3 +453,16 @@ Apple SHARP の出力と同じ入力を目視比較し、依頼者が限定視�
 次のPhase 2では同梱FBXをGLBへ変換し、33点からボーンへretargetしたskinned meshのdepth/normal G-bufferで現在の距離場priorを置き換える。Phase 3では商用利用可能な単眼depthをWebGPUで推論し、顔・髪・衣服のdetailは単眼depth、関節・遮蔽・背面はrig depthを優先して融合する。
 
 リポジトリのSHARP出力は最終品質の目視比較資料とし、学習・変換・アプリ配信には使わない。合格条件は背景splat数0、splat上限遵守、骨長比維持、silhouette IoU、25度orbitでの穴率、およびSHARP出力との同一入力比較とする。
+
+### 18.1 二段階UIとGLBリターゲット
+
+生成操作を明確に二段階へ分離する。STEP 1は人物推定だけを実行し、画像正規化座標ではなくMediaPipeのメートル単位3D world landmarksを使い、同梱FBXからbuild時に変換したGLBへ肩・肘・手首・腰・膝・足首・脊椎・首の方向をretargetする。利用者は写真面ではなく、orbit可能な素体GLBを見て三次元姿勢を確認する。STEP 1が成功するまでSTEP 2は無効とする。STEP 2で初めて、確認済みの同じPoseGuidanceと人物maskから3DGSを生成し、viewerをGLB表示からsplat表示へ切り替える。
+
+
+### 18.2 姿勢の手動補正
+
+STEP 1では3D world landmarksの奥行き倍率と素体の体幅を調整できる。さらに左右の上腕・前腕・大腿・下腿を選択し、ローカルX/Y/Z軸を各±90度で補正する。補正quaternionは推定直後のボーン姿勢へ合成し、関節を切り替えても保持する。STEP 2はこの確認済み姿勢を基準とする。
+
+### 18.3 GLB depthの3DGS入力
+
+STEP 2開始時に、手動補正後のskinned GLBを正面orthographic cameraからoffscreen depth targetへ描画する。読み戻したrig depthを骨格補間depthと融合してGaussian中心面へ使用するため、STEP 1で確認・補正したポーズがSTEP 2の形状へ引き継がれる。人物mask外は引き続き破棄し、GLB depthが得られない衣服・髪領域では骨格depthへfallbackする。

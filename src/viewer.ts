@@ -49,6 +49,8 @@ export class SplatViewer {
     this.points.material.uniforms.mode.value = { color: 0, depth: 1, opacity: 2, confidence: 3 }[mode];
   }
 
+  setVisible(value: boolean): void { this.renderer.domElement.hidden = !value; }
+
   reset(): void {
     this.camera.position.set(0, 0, 3.5);
     this.controls.target.set(0, 0, 0);
