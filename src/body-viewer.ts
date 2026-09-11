@@ -2,6 +2,67 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { PoseGuidance } from "./pose";
+import {
+  getContainRect,
+  mapLandmarkToContain,
+  type Size,
+} from "./pose-overlay";
+
+export interface FrontAlignment {
+  pixelsPerUnit: number;
+  offsetX: number;
+  offsetY: number;
+  rmsDiagonalRatio: number;
+}
+
+/** Least-squares screen-space fit used by both the live camera and regression tests. */
+export function solveFrontAlignment(
+  modelPoints: Array<{ x: number; y: number }>,
+  imagePoints: Array<{ x: number; y: number }>,
+  viewport: Size,
+): FrontAlignment {
+  if (modelPoints.length !== imagePoints.length || modelPoints.length < 2)
+    throw new Error("対応点が不足しています");
+  const mc = modelPoints.reduce(
+    (a, p) => ({
+      x: a.x + p.x / modelPoints.length,
+      y: a.y + p.y / modelPoints.length,
+    }),
+    { x: 0, y: 0 },
+  );
+  const ic = imagePoints.reduce(
+    (a, p) => ({
+      x: a.x + p.x / imagePoints.length,
+      y: a.y + p.y / imagePoints.length,
+    }),
+    { x: 0, y: 0 },
+  );
+  let numerator = 0,
+    denominator = 0;
+  for (let i = 0; i < modelPoints.length; i++) {
+    const mx = modelPoints[i].x - mc.x,
+      my = modelPoints[i].y - mc.y;
+    numerator +=
+      mx * (imagePoints[i].x - ic.x) + my * (imagePoints[i].y - ic.y);
+    denominator += mx * mx + my * my;
+  }
+  const pixelsPerUnit = denominator ? numerator / denominator : 1;
+  const offsetX = ic.x - pixelsPerUnit * mc.x;
+  const offsetY = ic.y - pixelsPerUnit * mc.y;
+  const squared = modelPoints.reduce((sum, p, i) => {
+    const dx = pixelsPerUnit * p.x + offsetX - imagePoints[i].x;
+    const dy = pixelsPerUnit * p.y + offsetY - imagePoints[i].y;
+    return sum + dx * dx + dy * dy;
+  }, 0);
+  return {
+    pixelsPerUnit,
+    offsetX,
+    offsetY,
+    rmsDiagonalRatio:
+      Math.sqrt(squared / modelPoints.length) /
+      Math.hypot(viewport.width, viewport.height),
+  };
+}
 
 export type JointId =
   | "hips"
@@ -197,9 +258,11 @@ export class BodyViewer {
   private selected: JointId = "hips";
   private depthScale = 1;
   private widthScale = 1;
+  private imageSize?: Size;
   constructor(
     private host: HTMLElement,
     private onSelect?: (id: JointId) => void,
+    private onFrontAngle?: (degrees: number) => void,
   ) {
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -207,13 +270,15 @@ export class BodyViewer {
       preserveDrawingBuffer: true,
     });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    this.renderer.setClearColor(0x121018, 1);
+    this.renderer.setClearColor(0x121018, 0);
+    this.renderer.domElement.classList.add("glb-canvas");
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     host.append(this.renderer.domElement);
     this.camera.position.set(0, 0.05, 3.4);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.target.set(0, 0, 0);
+    this.controls.addEventListener("change", () => this.reportFrontAngle());
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x24182f, 2.4));
     const light = new THREE.DirectionalLight(0xffffff, 3);
     light.position.set(2, 4, 3);
@@ -222,10 +287,11 @@ export class BodyViewer {
     new ResizeObserver(() => this.resize()).observe(host);
     this.loop();
   }
-  async showPose(pose: PoseGuidance, depthScale = 1) {
+  async showPose(pose: PoseGuidance, depthScale = 1, imageSize?: Size) {
     await this.ensureModel();
     this.pose = pose;
     this.depthScale = depthScale;
+    this.imageSize = imageSize;
     this.corrections.clear();
     this.retarget();
     this.fit();
@@ -522,8 +588,72 @@ export class BodyViewer {
       this.baseScale,
     );
     this.model.updateWorldMatrix(true, true);
+    this.fitFrontProjection();
     this.updateHelper();
-    this.reset();
+  }
+  private fitFrontProjection() {
+    if (!this.model || !this.pose || !this.imageSize) return this.reset();
+    const viewport = {
+      width: this.host.clientWidth,
+      height: this.host.clientHeight,
+    };
+    if (!viewport.width || !viewport.height) return;
+    const rect = getContainRect(this.imageSize, viewport);
+    // Shoulders, hips, knees, ankles: stable points spanning the person's height and width.
+    const pairs: Array<[string, number]> = [
+      ["mixamorig:LeftArm", 11],
+      ["mixamorig:RightArm", 12],
+      ["mixamorig:LeftUpLeg", 23],
+      ["mixamorig:RightUpLeg", 24],
+      ["mixamorig:LeftLeg", 25],
+      ["mixamorig:RightLeg", 26],
+      ["mixamorig:LeftFoot", 27],
+      ["mixamorig:RightFoot", 28],
+    ];
+    const usable = pairs.filter(
+      ([name, index]) =>
+        this.model!.getObjectByName(name) &&
+        (this.pose!.landmarks[index].visibility ?? 1) > 0.35,
+    );
+    const world = usable.map(([name]) => {
+      const p = new THREE.Vector3();
+      this.model!.getObjectByName(name)!.getWorldPosition(p);
+      return { x: p.x, y: -p.y };
+    });
+    const image = usable.map(([, index]) =>
+      mapLandmarkToContain(this.pose!.landmarks[index], rect),
+    );
+    if (world.length < 2) return this.reset();
+    const fit = solveFrontAlignment(world, image, viewport);
+    const distance = 3.4;
+    this.camera.fov = THREE.MathUtils.radToDeg(
+      2 *
+        Math.atan(
+          viewport.height / (2 * Math.abs(fit.pixelsPerUnit) * distance),
+        ),
+    );
+    this.camera.fov = THREE.MathUtils.clamp(this.camera.fov, 10, 80);
+    this.camera.updateProjectionMatrix();
+    const actualScale =
+      viewport.height /
+      (2 * distance * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)));
+    this.model.position.x += (fit.offsetX - viewport.width / 2) / actualScale;
+    this.model.position.y -= (fit.offsetY - viewport.height / 2) / actualScale;
+    this.model.updateWorldMatrix(true, true);
+    this.camera.position.set(0, 0, distance);
+    this.controls.target.set(0, 0, 0);
+    this.controls.update();
+  }
+  private reportFrontAngle() {
+    const direction = this.camera.position
+      .clone()
+      .sub(this.controls.target)
+      .normalize();
+    this.onFrontAngle?.(
+      THREE.MathUtils.radToDeg(
+        Math.acos(THREE.MathUtils.clamp(direction.z, -1, 1)),
+      ),
+    );
   }
   private resize() {
     const w = this.host.clientWidth,

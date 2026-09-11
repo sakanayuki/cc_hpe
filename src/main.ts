@@ -27,6 +27,8 @@ app.innerHTML = `
         <button class="primary" id="estimate" disabled><span>1</span> 姿勢を推定して素体を表示</button>
         <div id="poseControls" class="pose-controls hidden">
           <h3>素体・関節の補正</h3>
+          <label class="reference-toggle"><input id="showReference" type="checkbox" checked/><span>元画像を表示</span></label>
+          <label class="field"><span>元画像の透過率 <output id="referenceOpacityOut">55%</output></span><input id="referenceOpacity" type="range" min="0" max="100" value="55"/></label>
           <label class="field"><span>姿勢の奥行き <output id="poseDepthOut">100%</output></span><input id="poseDepth" type="range" min="25" max="200" value="100"/></label>
           <label class="field"><span>体幅 <output id="bodyWidthOut">100%</output></span><input id="bodyWidth" type="range" min="70" max="140" value="100"/></label><label class="field"><span>身長比 <output id="bodyHeightOut">100%</output></span><input id="bodyHeight" type="range" min="80" max="120" value="100"/></label><label class="field"><span>腕の長さ <output id="armLengthOut">100%</output></span><input id="armLength" type="range" min="75" max="130" value="100"/></label><label class="field"><span>脚の長さ <output id="legLengthOut">100%</output></span><input id="legLength" type="range" min="75" max="130" value="100"/></label>
           <div id="poseQuality" class="pose-quality"></div>
@@ -44,7 +46,7 @@ app.innerHTML = `
       </aside>
       <section class="viewer-card" aria-label="3Dビューアー">
         <div class="toolbar"><div><b id="stageLabel">STEP 1 · 素体GLBプレビュー</b><div class="segmented" id="views"><button data-view="front">正面</button><button data-view="side">側面</button><button data-view="back">背面</button><button data-view="top">上面</button></div><div class="segmented hidden" id="modes" role="group" aria-label="表示情報"><button class="active" data-mode="color">カラー</button><button data-mode="depth">深度</button><button data-mode="opacity">不透明度</button><button data-mode="confidence">信頼度</button><button data-mode="source">生成層</button></div><div id="filters" class="viewer-filters hidden"><label>信頼度 <input id="minConfidence" type="range" min="0" max="100" value="0"/><output id="minConfidenceOut">0%</output></label><select id="layerFilter" aria-label="生成層フィルター"><option value="-1">全生成層</option><option value="0">前面のみ</option><option value="1">中心のみ</option><option value="2">推定背面のみ</option></select></div></div><button id="reset" class="icon-button" title="視点をリセット">↻</button></div>
-        <div id="viewer" class="viewer"><div id="empty" class="empty"><div class="orb"><span></span></div><strong>姿勢付き素体プレビュー</strong><p>写真を選びSTEP 1を実行すると、<br>推定ポーズを適用したGLB素体を表示します</p></div><div id="angle" class="angle hidden">品質保証範囲外 · <b>0°</b></div></div>
+        <div id="viewer" class="viewer"><img id="referenceImage" class="reference-image hidden" alt="GLB比較用の元画像"/><div id="empty" class="empty"><div class="orb"><span></span></div><strong>姿勢付き素体プレビュー</strong><p>写真を選びSTEP 1を実行すると、<br>推定ポーズを適用したGLB素体を表示します</p></div><div id="angle" class="angle hidden">品質保証範囲外 · <b>0°</b></div></div>
         <footer class="viewer-footer"><span><kbd>ドラッグ</kbd> 回転</span><span><kbd>ホイール</kbd> ズーム</span><span id="fps">-- FPS</span><span id="stats">0 splats</span></footer>
       </section>
     </section>
@@ -67,7 +69,28 @@ const selectJoint = (id: JointId) => {
   byId<HTMLSelectElement>("joint").value = id;
   syncJointControls();
 };
-const bodyViewer = new BodyViewer(byId("viewer"), selectJoint);
+const referenceImage = byId<HTMLImageElement>("referenceImage");
+const showReference = byId<HTMLInputElement>("showReference");
+const referenceOpacity = byId<HTMLInputElement>("referenceOpacity");
+let referenceUrl: string | undefined;
+let frontAngle = 0;
+const updateReference = () => {
+  const enabled =
+    showReference.checked && bodyViewer.isVisible() && !!referenceUrl;
+  referenceImage.classList.toggle("hidden", !enabled);
+  referenceImage.style.opacity = String(
+    (Number(referenceOpacity.value) / 100) * (frontAngle > 25 ? 0.16 : 1),
+  );
+  referenceImage.classList.toggle("comparison-muted", frontAngle > 25);
+};
+const bodyViewer = new BodyViewer(byId("viewer"), selectJoint, (angle) => {
+  frontAngle = angle;
+  const warning = byId("angle");
+  warning.classList.toggle("hidden", angle <= 25);
+  warning.querySelector("b")!.textContent =
+    `${Math.round(angle)}° · 画像比較OFF`;
+  updateReference();
+});
 const viewer = new SplatViewer(
   byId("viewer"),
   (angle) => {
@@ -92,6 +115,13 @@ layerFilter.addEventListener("change", () =>
 let sourceImage: HTMLImageElement | undefined;
 let cloud: GaussianCloud | undefined;
 let pose: PoseGuidance | undefined;
+
+showReference.addEventListener("change", updateReference);
+referenceOpacity.addEventListener("input", () => {
+  byId<HTMLOutputElement>("referenceOpacityOut").value =
+    `${referenceOpacity.value}%`;
+  updateReference();
+});
 
 count.addEventListener(
   "input",
@@ -269,6 +299,8 @@ async function loadFile(file: File): Promise<void> {
   image.src = url;
   try {
     await image.decode();
+    if (referenceUrl) URL.revokeObjectURL(referenceUrl);
+    referenceUrl = url;
     sourceImage = image;
     pose = undefined;
     byId<HTMLDivElement>("thumbWrap").style.setProperty(
@@ -276,6 +308,7 @@ async function loadFile(file: File): Promise<void> {
       `${image.naturalWidth} / ${image.naturalHeight}`,
     );
     byId<HTMLImageElement>("thumb").src = url;
+    referenceImage.src = url;
     byId("thumbWrap").classList.remove("hidden");
     byId("poseControls").classList.add("hidden");
     byId("exports").classList.add("hidden");
@@ -289,6 +322,10 @@ async function loadFile(file: File): Promise<void> {
 }
 
 function clear(): void {
+  if (referenceUrl) URL.revokeObjectURL(referenceUrl);
+  referenceUrl = undefined;
+  referenceImage.removeAttribute("src");
+  referenceImage.classList.add("hidden");
   sourceImage = undefined;
   pose = undefined;
   fileInput.value = "";
@@ -307,9 +344,14 @@ estimate.addEventListener("click", async () => {
   try {
     pose = await detectSinglePerson(sourceImage);
     drawPoseOverlay(pose);
-    await bodyViewer.showPose(pose, Number(poseDepth.value) / 100);
+    await bodyViewer.showPose(pose, Number(poseDepth.value) / 100, {
+      width: sourceImage.naturalWidth,
+      height: sourceImage.naturalHeight,
+    });
     bodyViewer.setVisible(true);
     viewer.setVisible(false);
+    frontAngle = 0;
+    updateReference();
     syncJointControls();
     byId("empty").classList.add("hidden");
     byId("poseControls").classList.remove("hidden");
@@ -366,6 +408,7 @@ generate.addEventListener("click", async () => {
     viewer.setCloud(cloud);
     bodyViewer.setVisible(false);
     viewer.setVisible(true);
+    referenceImage.classList.add("hidden");
     byId("stageLabel").textContent = "STEP 2 · 3D Gaussian Splat";
     byId("views").classList.add("hidden");
     byId("modes").classList.remove("hidden");

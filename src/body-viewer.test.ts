@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { poseDirection } from "./body-viewer";
+import { poseDirection, solveFrontAlignment } from "./body-viewer";
 import type { PoseGuidance } from "./pose";
 
 const points = Array.from({ length: 33 }, () => ({
@@ -30,5 +30,30 @@ describe("GLB pose retargeting", () => {
     pose.worldLandmarks[11] = { x: -1, y: 0, z: 0, visibility: 1 };
     pose.worldLandmarks[12] = { x: 1, y: 0, z: 0, visibility: 1 };
     expect(poseDirection([23, 24], [11, 12], pose).y).toBeCloseTo(1);
+  });
+});
+
+describe("front image/GLB projection alignment", () => {
+  it("minimizes shoulder, hip, knee and ankle error relative to image diagonal", () => {
+    const glb = [
+      { x: -0.45, y: -0.8 },
+      { x: 0.45, y: -0.8 },
+      { x: -0.25, y: 0 },
+      { x: 0.25, y: 0 },
+      { x: -0.22, y: 0.85 },
+      { x: 0.22, y: 0.85 },
+      { x: -0.2, y: 1.65 },
+      { x: 0.2, y: 1.65 },
+    ];
+    const landmarks = glb.map((p, i) => ({
+      x: 225 + p.x * 180 + (i % 2 ? 1 : -1),
+      y: 360 + p.y * 180 + ((i % 3) - 1),
+    }));
+    const fit = solveFrontAlignment(glb, landmarks, {
+      width: 450,
+      height: 800,
+    });
+    expect(fit.rmsDiagonalRatio).toBeLessThan(0.003);
+    expect(fit.pixelsPerUnit).toBeCloseTo(180, 0);
   });
 });
