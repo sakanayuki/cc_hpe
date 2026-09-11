@@ -12,6 +12,7 @@ import {
 export type JointId =
   | "hips"
   | "spine"
+  | "spine1"
   | "chest"
   | "neck"
   | "head"
@@ -159,6 +160,7 @@ export function applyJointCorrection(
 export const JOINT_LABELS: Record<JointId, string> = {
   hips: "腰",
   spine: "背骨",
+  spine1: "背骨（中央）",
   chest: "胸",
   neck: "首",
   head: "頭",
@@ -193,6 +195,13 @@ export const RULES: readonly Rule[] = [
     from: [23, 24],
     to: [11, 12],
     child: "mixamorig:Spine1",
+  },
+  {
+    id: "spine1",
+    bone: "mixamorig:Spine1",
+    from: [23, 24],
+    to: [11, 12],
+    child: "mixamorig:Spine2",
   },
   {
     id: "chest",
@@ -464,22 +473,58 @@ export function captureRestPose(model: THREE.Object3D) {
   return result;
 }
 
-function torsoFrame(pose: PoseGuidance, depthScale: number) {
+function frameFromUpAndRight(
+  upValue: THREE.Vector3,
+  rightValue: THREE.Vector3,
+) {
+  const up = upValue.clone().normalize();
+  const right = rightValue
+    .clone()
+    .addScaledVector(up, -rightValue.dot(up))
+    .normalize();
+  if (up.lengthSq() <= EPSILON || right.lengthSq() <= EPSILON) return undefined;
+  const front = right.clone().cross(up).normalize();
+  if (front.lengthSq() <= EPSILON) return undefined;
+  return new THREE.Quaternion()
+    .setFromRotationMatrix(
+      new THREE.Matrix4().makeBasis(right, front.clone().cross(right), front),
+    )
+    .normalize();
+}
+
+function torsoFrames(pose: PoseGuidance, depthScale: number) {
   if (!usable([11, 12, 23, 24], pose)) return undefined;
   const hips = average([23, 24], pose, depthScale);
   const shoulders = average([11, 12], pose, depthScale);
-  const right = average([12], pose, depthScale).sub(
+  const hipRight = average([24], pose, depthScale).sub(
+    average([23], pose, depthScale),
+  );
+  const shoulderRight = average([12], pose, depthScale).sub(
     average([11], pose, depthScale),
   );
-  const up = shoulders.sub(hips);
-  if (right.lengthSq() <= EPSILON || up.lengthSq() <= EPSILON) return undefined;
-  right.normalize();
-  const front = right.clone().cross(up).normalize();
-  if (front.lengthSq() <= EPSILON) return undefined;
-  const correctedUp = front.clone().cross(right).normalize();
-  return new THREE.Quaternion().setFromRotationMatrix(
-    new THREE.Matrix4().makeBasis(right, correctedUp, front),
+  const torsoUp = shoulders.clone().sub(hips);
+  // Both lateral observations contribute to the pelvis frame: using only the
+  // shoulders makes a hip yaw look like spine twist.
+  const root = frameFromUpAndRight(
+    torsoUp,
+    hipRight.clone().normalize().add(shoulderRight.clone().normalize()),
   );
+  if (!root) return undefined;
+
+  let chestUp = torsoUp;
+  if (usable([7, 8], pose))
+    chestUp = average([7, 8], pose, depthScale).sub(shoulders);
+  else if (usable([0], pose))
+    chestUp = average([0], pose, depthScale).sub(shoulders);
+  const chest = frameFromUpAndRight(chestUp, shoulderRight) ?? root.clone();
+  return { root, chest };
+}
+
+function restFrame(saved: RestBone) {
+  const restRight = new THREE.Vector3(1, 0, 0).applyQuaternion(
+    saved.worldQuaternion,
+  );
+  return frameFromUpAndRight(saved.worldDirection, restRight);
 }
 
 /** Retargets from immutable rest data and is intentionally usable in unit tests. */
@@ -494,8 +539,13 @@ export function retargetSkeleton(
     missingBones: [],
     skippedBones: [],
   };
-  const bodyFrame = torsoFrame(pose, depthScale);
-  const torsoIds = new Set<JointId>(["hips", "spine", "chest"]);
+  const bodyFrames = torsoFrames(pose, depthScale);
+  const torsoWeights: Partial<Record<JointId, number>> = {
+    hips: 0,
+    spine: 1 / 3,
+    spine1: 2 / 3,
+    chest: 1,
+  };
 
   // Always reset the whole chain first: repeated calls must never accumulate.
   for (const rule of RULES) {
@@ -516,21 +566,22 @@ export function retargetSkeleton(
       continue;
     }
     let desiredWorld: THREE.Quaternion | undefined;
-    if (torsoIds.has(rule.id) && bodyFrame) {
-      // Rest GLB axes are inferred once from its front/up convention.  The
-      // target body frame carries root yaw/roll, torso lean and shoulder tilt.
-      const restUp = saved.worldDirection;
-      const restRight = new THREE.Vector3(1, 0, 0).applyQuaternion(
-        saved.worldQuaternion,
-      );
-      const restFront = restRight.clone().cross(restUp).normalize();
-      const restFrame = new THREE.Quaternion().setFromRotationMatrix(
-        new THREE.Matrix4().makeBasis(restRight, restUp, restFront),
-      );
-      desiredWorld = bodyFrame
+    const torsoWeight = torsoWeights[rule.id];
+    if (torsoWeight !== undefined && bodyFrames) {
+      // Interpolated *world* frames distribute bend/twist along the chain;
+      // applying one torso quaternion to every local bone would compound it.
+      const targetFrame = bodyFrames.root
         .clone()
-        .multiply(restFrame.invert())
-        .multiply(saved.worldQuaternion);
+        .slerp(bodyFrames.chest, torsoWeight)
+        .normalize();
+      const sourceFrame = restFrame(saved);
+      if (sourceFrame) {
+        const restCorrection = sourceFrame
+          .clone()
+          .invert()
+          .multiply(saved.worldQuaternion);
+        desiredWorld = targetFrame.multiply(restCorrection).normalize();
+      }
     } else if (usable([...rule.from, ...rule.to], pose)) {
       const target = poseDirection(rule.from, rule.to, pose, depthScale);
       if (
@@ -539,7 +590,8 @@ export function retargetSkeleton(
       )
         desiredWorld = new THREE.Quaternion()
           .setFromUnitVectors(saved.worldDirection, target)
-          .multiply(saved.worldQuaternion);
+          .multiply(saved.worldQuaternion)
+          .normalize();
     }
     if (!desiredWorld) {
       // Keeping the restored local rotation safely inherits the final parent.
@@ -550,7 +602,12 @@ export function retargetSkeleton(
     const parentWorld =
       bone.parent?.getWorldQuaternion(new THREE.Quaternion()) ??
       new THREE.Quaternion();
-    bone.quaternion.copy(parentWorld.invert().multiply(desiredWorld));
+    // local = inverse(parent target world) * target world * rest correction.
+    // `desiredWorld` already includes that correction.  Minimal-vector swing
+    // above leaves the unobservable rest-pose twist intact.
+    bone.quaternion
+      .copy(parentWorld.invert().multiply(desiredWorld))
+      .normalize();
     model.updateWorldMatrix(true, true);
     report.appliedBones++;
   }

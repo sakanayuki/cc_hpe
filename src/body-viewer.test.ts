@@ -123,6 +123,95 @@ describe("GLB pose retargeting", () => {
     expect(Math.abs(hips.quaternion.dot(onceQ))).toBeCloseTo(1);
     expect(hips.position.distanceTo(onceP)).toBeCloseTo(0);
   });
+
+  it("distributes simultaneous hip yaw, torso lean, and shoulder roll through the real spine chain", () => {
+    const hips = new THREE.Bone();
+    hips.name = "mixamorig:Hips";
+    const add = (parent: THREE.Bone, name: string) => {
+      const bone = new THREE.Bone();
+      bone.name = name;
+      bone.position.y = 1;
+      parent.add(bone);
+      return bone;
+    };
+    const spine = add(hips, "mixamorig:Spine");
+    const spine1 = add(spine, "mixamorig:Spine1");
+    const spine2 = add(spine1, "mixamorig:Spine2");
+    add(spine2, "mixamorig:Neck");
+    hips.updateWorldMatrix(true, true);
+    const rest = captureRestPose(hips);
+    expect(rest.has("mixamorig:Spine1")).toBe(true);
+
+    const p = structuredClone(pose);
+    const put = (index: number, value: THREE.Vector3) => {
+      p.worldLandmarks[index] = {
+        x: value.x,
+        y: -value.y,
+        z: -value.z,
+        visibility: 1,
+      };
+    };
+    const hipCenter = new THREE.Vector3(0, 0, 0);
+    const shoulderCenter = new THREE.Vector3(0.45, 2, 0.35);
+    const hipRight = new THREE.Vector3(0.8, 0, -0.6);
+    const shoulderRight = new THREE.Vector3(0.75, 0.45, -0.3).normalize();
+    const headCenter = shoulderCenter
+      .clone()
+      .add(new THREE.Vector3(0.2, 1, 0.4));
+    put(23, hipCenter.clone().addScaledVector(hipRight, -0.5));
+    put(24, hipCenter.clone().addScaledVector(hipRight, 0.5));
+    put(11, shoulderCenter.clone().addScaledVector(shoulderRight, -0.7));
+    put(12, shoulderCenter.clone().addScaledVector(shoulderRight, 0.7));
+    put(7, headCenter.clone().addScaledVector(shoulderRight, -0.15));
+    put(8, headCenter.clone().addScaledVector(shoulderRight, 0.15));
+
+    const frame = (upValue: THREE.Vector3, rightValue: THREE.Vector3) => {
+      const up = upValue.clone().normalize();
+      const right = rightValue
+        .clone()
+        .addScaledVector(up, -rightValue.dot(up))
+        .normalize();
+      const front = right.clone().cross(up).normalize();
+      return new THREE.Quaternion().setFromRotationMatrix(
+        new THREE.Matrix4().makeBasis(right, front.clone().cross(right), front),
+      );
+    };
+    const rootFrame = frame(
+      shoulderCenter.clone().sub(hipCenter),
+      hipRight.clone().normalize().add(shoulderRight),
+    );
+    const chestFrame = frame(
+      headCenter.clone().sub(shoulderCenter),
+      shoulderRight,
+    );
+    const expectedWorld = [0, 1 / 3, 2 / 3, 1].map((weight) =>
+      rootFrame.clone().slerp(chestFrame, weight).normalize(),
+    );
+
+    retargetSkeleton(hips, p, rest);
+    const bones = [hips, spine, spine1, spine2];
+    for (let i = 0; i < bones.length; i++) {
+      const actualWorld = bones[i].getWorldQuaternion(new THREE.Quaternion());
+      const actualDirection = new THREE.Vector3(0, 1, 0).applyQuaternion(
+        actualWorld,
+      );
+      const expectedDirection = new THREE.Vector3(0, 1, 0).applyQuaternion(
+        expectedWorld[i],
+      );
+      expect(actualDirection.dot(expectedDirection)).toBeCloseTo(1, 5);
+
+      const parentWorld =
+        i === 0 ? new THREE.Quaternion() : expectedWorld[i - 1];
+      const expectedLocal = parentWorld
+        .clone()
+        .invert()
+        .multiply(expectedWorld[i]);
+      expect(Math.abs(bones[i].quaternion.dot(expectedLocal))).toBeCloseTo(
+        1,
+        5,
+      );
+    }
+  });
 });
 
 describe("front image/GLB projection alignment", () => {
