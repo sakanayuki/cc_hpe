@@ -207,15 +207,20 @@ main {
   font-size: 12px;
 }
 .thumb-wrap {
-  height: 145px;
+  width: 100%;
+  aspect-ratio: var(--image-aspect, 9 / 16);
+  max-height: min(520px, 65vh);
   position: relative;
   border-radius: 16px;
   overflow: hidden;
+  background: #0e0c12;
 }
 .thumb-wrap img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 .thumb-wrap button {
   position: absolute;
@@ -451,6 +456,9 @@ kbd {
   .workspace {
     grid-template-columns: 1fr;
   }
+  .thumb-wrap {
+    max-height: min(440px, 65vh);
+  }
   .viewer {
     height: 420px;
   }
@@ -541,7 +549,6 @@ kbd {
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
   pointer-events: none;
 }
 .pose-quality {
