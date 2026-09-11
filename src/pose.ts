@@ -13,6 +13,20 @@ export interface PoseGuidance {
   rigDepth?: Float32Array;
   rigDepthWidth?: number;
   rigDepthHeight?: number;
+  /** Camera-fitted G-buffer of the posed body, in source-image pixel space. */
+  rigSurface?: RigSurfaceBuffer;
+}
+
+export interface RigSurfaceBuffer {
+  width: number;
+  height: number;
+  /** WebGL depth in [0,1], with 1 denoting no mesh. */
+  frontDepth: Float32Array;
+  backDepth: Float32Array;
+  mask: Uint8Array;
+  /** View-space XYZ normal, three floats per pixel. */
+  normal: Float32Array;
+  inverseProjectionView: Float32Array;
 }
 
 let instance: Promise<PoseLandmarker> | undefined;
