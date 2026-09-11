@@ -32,15 +32,15 @@
 
 ## 3. 成功条件
 
-|分類|受け入れ条件（初期値）|
-|---|---|
-|機能|対応画像を投入して、姿勢プレビュー、3DGS プレビュー、3 形式のダウンロードまでサーバー通信なしで完了する|
-|見た目|同梱テスト画像について正面からの pitch / yaw 合成角 25° 以内で前景の主要部位が破綻せず、正面では入力画像との silhouette IoU が 0.85 以上。解像感を維持した上で穴の少なさを優先する|
-|姿勢|可視主要関節の再投影誤差の中央値が画像対角の 3% 以下。超過時は UI で警告し手動補正可能|
-|性能|指定 PC（Core i7-13650HX、RAM 16 GB、RTX 4060 Laptop 8 GB）で生成 5 分以内、最大 500k splats の viewer を 30 FPS 以上とする|
-|容量|最大 500k splats、非圧縮 PLY 100 MB 以下。端末能力により品質 preset と上限を自動調整する|
-|プライバシー|生成処理中に画像データをネットワーク送信しない。CSP とテストで保証する|
-|互換性|最新安定版 Chrome を正式対応とし、最新の WebGPU 対応スマートフォンは best effort とする|
+| 分類         | 受け入れ条件（初期値）                                                                                                                                                             |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 機能         | 対応画像を投入して、姿勢プレビュー、3DGS プレビュー、3 形式のダウンロードまでサーバー通信なしで完了する                                                                            |
+| 見た目       | 同梱テスト画像について正面からの pitch / yaw 合成角 25° 以内で前景の主要部位が破綻せず、正面では入力画像との silhouette IoU が 0.85 以上。解像感を維持した上で穴の少なさを優先する |
+| 姿勢         | 可視主要関節の再投影誤差の中央値が画像対角の 3% 以下。超過時は UI で警告し手動補正可能                                                                                             |
+| 性能         | 指定 PC（Core i7-13650HX、RAM 16 GB、RTX 4060 Laptop 8 GB）で生成 5 分以内、最大 500k splats の viewer を 30 FPS 以上とする                                                        |
+| 容量         | 最大 500k splats、非圧縮 PLY 100 MB 以下。端末能力により品質 preset と上限を自動調整する                                                                                           |
+| プライバシー | 生成処理中に画像データをネットワーク送信しない。CSP とテストで保証する                                                                                                             |
+| 互換性       | 最新安定版 Chrome を正式対応とし、最新の WebGPU 対応スマートフォンは best effort とする                                                                                            |
 
 数値はベンチマーク整備後に端末クラス別へ改訂する。
 
@@ -91,17 +91,17 @@ Browser (runtime lane; all user data remains local)
 
 ## 6. 技術選定
 
-|領域|第一候補|代替 / 方針|
-|---|---|---|
-|UI / build|TypeScript + Vite|フレームワークは React または Vanilla を実装開始前に決定|
-|3D / FBX・GLB|Three.js、`GLTFLoader`|FBX は CI で GLB 化。ランタイム `FBXLoader` は診断用のみ|
-|画像処理|OpenCV.js の必要モジュールだけ custom build|単純処理は Canvas / WebGPU shader とし bundle を抑える|
-|推論|ONNX Runtime Web: WebGPU EP 優先、WASM EP fallback|モデル演算の互換表を CI で検証|
-|姿勢|商用利用可能な単人人体 landmark モデルを benchmark 後固定|COCO 17 点だけでなく肩・腰・手足・顔基準を含むモデルを優先|
-|segment|軽量 person matting / segmentation ONNX|pose mask が十分なら統合モデルを優先|
-|splat renderer|自前の薄い WebGPU renderer またはライセンス適合した SPARK.js adapter|SuperSplat はファイル相互運用とデバッグ UX の参照に留め、依存時は license 固定|
-|export|canonical buffer から各 encoder を独立実装|SPZ は公式仕様・参照 encoder のライセンス確認後 WASM 化|
-|テスト|Vitest + Playwright + shader golden tests|WebGPU software adapter と実 GPU の二層|
+| 領域           | 第一候補                                                             | 代替 / 方針                                                                    |
+| -------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| UI / build     | TypeScript + Vite                                                    | フレームワークは React または Vanilla を実装開始前に決定                       |
+| 3D / FBX・GLB  | Three.js、`GLTFLoader`                                               | FBX は CI で GLB 化。ランタイム `FBXLoader` は診断用のみ                       |
+| 画像処理       | OpenCV.js の必要モジュールだけ custom build                          | 単純処理は Canvas / WebGPU shader とし bundle を抑える                         |
+| 推論           | ONNX Runtime Web: WebGPU EP 優先、WASM EP fallback                   | モデル演算の互換表を CI で検証                                                 |
+| 姿勢           | 商用利用可能な単人人体 landmark モデルを benchmark 後固定            | COCO 17 点だけでなく肩・腰・手足・顔基準を含むモデルを優先                     |
+| segment        | 軽量 person matting / segmentation ONNX                              | pose mask が十分なら統合モデルを優先                                           |
+| splat renderer | 自前の薄い WebGPU renderer またはライセンス適合した SPARK.js adapter | SuperSplat はファイル相互運用とデバッグ UX の参照に留め、依存時は license 固定 |
+| export         | canonical buffer から各 encoder を独立実装                           | SPZ は公式仕様・参照 encoder のライセンス確認後 WASM 化                        |
+| テスト         | Vitest + Playwright + shader golden tests                            | WebGPU software adapter と実 GPU の二層                                        |
 
 Triposplat、SHARP、その他研究実装は、ライセンス・特許・学習データ条件を `THIRD_PARTY_NOTICES.md` と model card で審査してから採否を決める。「公開されている」は「商用利用可能」と同義ではない。
 
@@ -190,18 +190,18 @@ proxy が見える胴体・四肢では proxy を強くし、髪・衣服境界�
 ```ts
 interface GaussianBuffer {
   count: number;
-  position: Float32Array;    // xyz, world meter
-  scale: Float32Array;       // xyz, positive linear scale
-  rotation: Float32Array;    // normalized xyzw quaternion
-  color: Uint8Array;         // sRGB rgba preview/export source
-  shDC: Float32Array;        // RGB DC coefficient, linear
-  opacity: Float32Array;     // [0, 1]
-  depth: Float32Array;       // source camera linear depth
-  normal: Float32Array;      // xyz
-  confidence: Float32Array;  // [0, 1]
-  sourceUV: Uint16Array;     // normalized UV, debug
+  position: Float32Array; // xyz, world meter
+  scale: Float32Array; // xyz, positive linear scale
+  rotation: Float32Array; // normalized xyzw quaternion
+  color: Uint8Array; // sRGB rgba preview/export source
+  shDC: Float32Array; // RGB DC coefficient, linear
+  opacity: Float32Array; // [0, 1]
+  depth: Float32Array; // source camera linear depth
+  normal: Float32Array; // xyz
+  confidence: Float32Array; // [0, 1]
+  sourceUV: Uint16Array; // normalized UV, debug
   partId: Uint8Array;
-  flags: Uint8Array;         // observed/inpainted/shell/boundary
+  flags: Uint8Array; // observed/inpainted/shell/boundary
 }
 ```
 
@@ -220,18 +220,18 @@ interface GaussianBuffer {
 
 `RenderMode` を shader uniform で切り替え、同一 buffer を再 upload しない。
 
-|モード|表示|
-|---|---|
-|Composite|通常の色 × opacity|
-|Color only|opacity を固定し色情報だけ表示|
-|Depth only|camera depth または source depth を選択し、near/far を histogram で正規化|
-|Opacity|0→1 の heatmap|
-|Scale|最大軸、最小軸、anisotropy のいずれか|
-|Rotation / normal|方向を RGB に map|
-|Confidence|推定信頼度の heatmap|
-|Part ID|頭・胴・左右腕・左右脚等を categorical color|
-|Provenance|observed / propagated / synthetic shell / boundary|
-|Overdraw|pixel あたり contribution 数|
+| モード            | 表示                                                                      |
+| ----------------- | ------------------------------------------------------------------------- |
+| Composite         | 通常の色 × opacity                                                        |
+| Color only        | opacity を固定し色情報だけ表示                                            |
+| Depth only        | camera depth または source depth を選択し、near/far を histogram で正規化 |
+| Opacity           | 0→1 の heatmap                                                            |
+| Scale             | 最大軸、最小軸、anisotropy のいずれか                                     |
+| Rotation / normal | 方向を RGB に map                                                         |
+| Confidence        | 推定信頼度の heatmap                                                      |
+| Part ID           | 頭・胴・左右腕・左右脚等を categorical color                              |
+| Provenance        | observed / propagated / synthetic shell / boundary                        |
+| Overdraw          | pixel あたり contribution 数                                              |
 
 さらに min/max depth、opacity、scale、confidence、part、flag、screen-space radius で filter し、invert と isolate を可能にする。「色情報のみ」は幾何を無効化する意味ではなく、位置は描画に必要なので色以外の可視化寄与を固定する、と UI tooltip に記載する。任意 splat を pick し全属性を inspector に表示する。
 
@@ -344,14 +344,14 @@ model-source (manually reviewed / immutable hash)
 
 ### 15.2 実装フェーズ
 
-|Phase|成果物|Exit criteria|
-|---|---|---|
-|0: Spike|FBX inspection、モデル/renderer/export license matrix、WebGPU device probe|法務 blocker 解消、1 test image の depth render|
-|1: Pose MVP|upload、single-person pose/mask、GLB retarget、3D preview、体型 slider/manual correction|再投影誤差と姿勢保存がテスト可能|
-|2: 3DGS MVP|proxy depth、deterministic Gaussian builder、WebGPU viewer|正面と ±15° の acceptance fixture 合格|
-|3: Debug/export|全表示 filter、picker、PLY/SPLAT/SPZ encoder|3 target viewers で round trip 合格|
-|4: Optimize|worker、LOD、model quantization、cache、fallback|性能 budget / accuracy gate 合格|
-|5: Release|security/privacy/accessibility、Pages workflow、docs|公開 checklist と rollback を確認|
+| Phase           | 成果物                                                                                   | Exit criteria                                   |
+| --------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| 0: Spike        | FBX inspection、モデル/renderer/export license matrix、WebGPU device probe               | 法務 blocker 解消、1 test image の depth render |
+| 1: Pose MVP     | upload、single-person pose/mask、GLB retarget、3D preview、体型 slider/manual correction | 再投影誤差と姿勢保存がテスト可能                |
+| 2: 3DGS MVP     | proxy depth、deterministic Gaussian builder、WebGPU viewer                               | 正面と ±15° の acceptance fixture 合格          |
+| 3: Debug/export | 全表示 filter、picker、PLY/SPLAT/SPZ encoder                                             | 3 target viewers で round trip 合格             |
+| 4: Optimize     | worker、LOD、model quantization、cache、fallback                                         | 性能 budget / accuracy gate 合格                |
+| 5: Release      | security/privacy/accessibility、Pages workflow、docs                                     | 公開 checklist と rollback を確認               |
 
 ## 16. 確定要件、調査結果、残確認事項
 
@@ -458,7 +458,6 @@ Apple SHARP の出力と同じ入力を目視比較し、依頼者が限定視�
 
 生成操作を明確に二段階へ分離する。STEP 1は人物推定だけを実行し、画像正規化座標ではなくMediaPipeのメートル単位3D world landmarksを使い、同梱FBXからbuild時に変換したGLBへ肩・肘・手首・腰・膝・足首・脊椎・首の方向をretargetする。利用者は写真面ではなく、orbit可能な素体GLBを見て三次元姿勢を確認する。STEP 1が成功するまでSTEP 2は無効とする。STEP 2で初めて、確認済みの同じPoseGuidanceと人物maskから3DGSを生成し、viewerをGLB表示からsplat表示へ切り替える。
 
-
 ### 18.2 姿勢の手動補正
 
 STEP 1では3D world landmarksの奥行き倍率と素体の体幅を調整できる。さらに左右の上腕・前腕・大腿・下腿を選択し、ローカルX/Y/Z軸を各±90度で補正する。補正quaternionは推定直後のボーン姿勢へ合成し、関節を切り替えても保持する。STEP 2はこの確認済み姿勢を基準とする。
@@ -466,3 +465,21 @@ STEP 1では3D world landmarksの奥行き倍率と素体の体幅を調整で�
 ### 18.3 GLB depthの3DGS入力
 
 STEP 2開始時に、手動補正後のskinned GLBを正面orthographic cameraからoffscreen depth targetへ描画する。読み戻したrig depthを骨格補間depthと融合してGaussian中心面へ使用するため、STEP 1で確認・補正したポーズがSTEP 2の形状へ引き継がれる。人物mask外は引き続き破棄し、GLB depthが得られない衣服・髪領域では骨格depthへfallbackする。
+
+## 19. 実装監査（2026-09-11）
+
+姿勢推定が利用者から確認できず、少数ボーンのsliderしかない旧STEP 1は受け入れ不可と判断して置き換えた。現実装は、入力写真へ33 landmarkの骨格を重ね、GLB側には19部位のbone helperを表示する。helperを直接クリックするか一覧で選び、XYZ回転を連続編集できる。rest poseを破壊して方向だけを代入する旧retargetを廃止し、元のlocal quaternionを保存した上でworld-space方向差分をparent-localへ変換する。
+
+STEP 2は編集済みskinned meshから取得したdepthを必須入力とし、人物segmentation外を生成候補から除外する。出力の前面・中心・推定背面にはsource layerを保持し、viewerとPLYで検査可能にする。SPZは固定した`spz-js` encoderでNiantic SPZ v3を生成する。これらにより「推定結果が見える」「全身関節を補正できる」「補正が出力形状へ渡る」をUIとデータの両方で追跡可能にする。
+
+### 19.1 最終品質監査
+
+点群を円形の`THREE.Points`として表示していた実装は、Gaussianが保持するscaleとquaternionを無視するため3DGS viewerとは認めない。各Gaussianをinstanced quadとして描画し、3D covarianceをview spaceへ移し、projection Jacobianから得た2D covarianceの固有軸に沿って楕円を描画する方式へ置き換える。opacity、confidence、front/center/inferred-backはGPU側でfilterでき、実測FPSを常時表示する。
+
+GLB depthと写真の座標対応はcanvas全体の単純比率ではなく、人物mask bounding boxとrig depth foreground bounding boxを正規化対応させる。rig depthはforeground内で正規化し、勾配からsurface normalを求めてGaussian quaternionへ変換する。出力境界では内部Y-upから指定RDF座標（+X right / -Y up / +Z front）へpositionとcovariance rotationを変換する。
+
+### 19.2 合成順序とサンプリング品質
+
+透明Gaussianをinstance登録順のまま描画すると視点変更で前後関係が破綻するため、カメラ操作終了時にview方向depthを65,536 bucketへ量子化し、O(n + buckets)のstable counting sortでfar-to-near順へ並べる。500k件でO(n log n) sortを避け、操作中のframe rateと操作終了後の正しいsource-over合成を両立する。
+
+Splat budgetで画素を間引く際はrow-majorの固定stride先頭を選ばず、各区間内でsilhouette境界と色勾配が最大の候補を保持する。人物輪郭、顔、衣服境界を優先し、mask確率にはsmoothstep featherを適用して硬い輪郭と背景混入を抑える。生成時間、推定PLY容量、実測FPSをUIへ表示し、5分・100 MB・30 FPSの受け入れ条件を利用端末上で観測可能にする。
