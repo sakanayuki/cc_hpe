@@ -3,6 +3,7 @@ import * as THREE from "three";
 import {
   applyBodyProportions,
   applyJointCorrection,
+  alignRootToImagePelvis,
   captureRestPose,
   fitFrontProjection,
   landmarkToModel,
@@ -125,6 +126,64 @@ describe("GLB pose retargeting", () => {
 });
 
 describe("front image/GLB projection alignment", () => {
+  it.each([
+    ["left/up", 0.2, 0.25],
+    ["right/down", 0.8, 0.75],
+  ])(
+    "projects the hips onto an offset pelvis anchor (%s) with transformed parents and a portrait image",
+    (_label, x, y) => {
+      const viewport = { width: 1000, height: 600 };
+      const imageSize = { width: 600, height: 1200 };
+      const camera = new THREE.PerspectiveCamera(
+        36,
+        viewport.width / viewport.height,
+        0.01,
+        100,
+      );
+      camera.position.set(0.4, -0.2, 6);
+      camera.lookAt(0, 0, 0);
+      camera.updateProjectionMatrix();
+
+      const parent = new THREE.Group();
+      parent.position.set(0.3, -0.1, 0.2);
+      parent.rotation.set(0.1, -0.2, 0.35);
+      parent.scale.set(1.3, 0.8, 1.1);
+      const root = new THREE.Group();
+      root.scale.set(1.7, 0.65, 1.25);
+      root.position.set(-0.25, 0.35, -0.1);
+      const hips = new THREE.Bone();
+      hips.name = "mixamorig:Hips";
+      hips.position.set(0.15, 0.4, 0.05);
+      parent.add(root);
+      root.add(hips);
+
+      const landmarks = structuredClone(points);
+      landmarks[23] = { x: x - 0.04, y: y + 0.02, z: 0, visibility: 1 };
+      landmarks[24] = { x: x + 0.04, y: y - 0.02, z: 0, visibility: 1 };
+      expect(
+        alignRootToImagePelvis(
+          root,
+          hips,
+          landmarks,
+          imageSize,
+          viewport,
+          camera,
+        ),
+      ).toBe(true);
+
+      const projected = hips
+        .getWorldPosition(new THREE.Vector3())
+        .project(camera);
+      const projectedPixel = {
+        x: ((projected.x + 1) / 2) * viewport.width,
+        y: ((1 - projected.y) / 2) * viewport.height,
+      };
+      // 600x1200 contained in 1000x600 is 300px wide with a 350px x offset.
+      expect(projectedPixel.x).toBeCloseTo(350 + x * 300, 5);
+      expect(projectedPixel.y).toBeCloseTo(y * 600, 5);
+    },
+  );
+
   it("minimizes major-joint reprojection error relative to image diagonal", () => {
     // shoulders, hips and feet in model space, transformed into a 9:16 photo.
     const model = [
