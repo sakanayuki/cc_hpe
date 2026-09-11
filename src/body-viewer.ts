@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { PoseGuidance } from "./pose";
+import type { PoseGuidance, RigSurfaceBuffer } from "./pose";
 import {
   getContainRect,
   mapLandmarkToContain,
@@ -830,58 +830,88 @@ export class BodyViewer {
       this.onSelect?.(id);
     }
   };
-  captureDepth(size = 512) {
+  /** Capture a source-image-aligned front/back depth, mask and normal G-buffer. */
+  captureDepth(width = 512, height = width): RigSurfaceBuffer {
     if (!this.model) throw new Error("素体が読み込まれていません");
     this.rebuildModel();
     this.model.updateWorldMatrix(true, true);
-    const box = new THREE.Box3().setFromObject(this.model),
-      center = box.getCenter(new THREE.Vector3()),
-      span =
-        Math.max(
-          box.getSize(new THREE.Vector3()).x,
-          box.getSize(new THREE.Vector3()).y,
-        ) * 0.58;
-    const target = new THREE.WebGLRenderTarget(size, size, {
+    const target = new THREE.WebGLRenderTarget(width, height, {
       type: THREE.UnsignedByteType,
       format: THREE.RGBAFormat,
       depthBuffer: true,
     });
-    const camera = new THREE.OrthographicCamera(
-      -span,
-      span,
-      span,
-      -span,
-      0.1,
-      10,
-    );
-    camera.position.set(center.x, center.y, center.z + 4);
-    camera.lookAt(center);
+    const camera = this.camera.clone();
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
     const previous = this.scene.overrideMaterial;
     this.helper.visible = false;
-    this.scene.overrideMaterial = new THREE.MeshDepthMaterial({
-      depthPacking: THREE.RGBADepthPacking,
-    });
-    this.renderer.setRenderTarget(target);
-    this.renderer.clear();
-    this.renderer.render(this.scene, camera);
-    const rgba = new Uint8Array(size * size * 4);
-    this.renderer.readRenderTargetPixels(target, 0, 0, size, size, rgba);
+    const render = (material: THREE.Material) => {
+      this.scene.overrideMaterial = material;
+      this.renderer.setRenderTarget(target);
+      this.renderer.clear();
+      this.renderer.render(this.scene, camera);
+      const pixels = new Uint8Array(width * height * 4);
+      this.renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels);
+      material.dispose();
+      return pixels;
+    };
+    const packedFront = render(
+      new THREE.MeshDepthMaterial({
+        depthPacking: THREE.RGBADepthPacking,
+        side: THREE.FrontSide,
+      }),
+    );
+    const packedBack = render(
+      new THREE.MeshDepthMaterial({
+        depthPacking: THREE.RGBADepthPacking,
+        side: THREE.BackSide,
+      }),
+    );
+    const packedNormal = render(
+      new THREE.MeshNormalMaterial({ side: THREE.FrontSide }),
+    );
     this.renderer.setRenderTarget(null);
     this.scene.overrideMaterial = previous;
     this.helper.visible = true;
     target.dispose();
-    const result = new Float32Array(size * size);
-    for (let y = 0; y < size; y++)
-      for (let x = 0; x < size; x++) {
-        const s = ((size - 1 - y) * size + x) * 4,
-          d = y * size + x;
-        result[d] =
-          rgba[s] / 255 / 256 ** 3 +
-          rgba[s + 1] / 255 / 256 ** 2 +
-          rgba[s + 2] / 255 / 256 +
-          rgba[s + 3] / 255;
+    const frontDepth = new Float32Array(width * height),
+      backDepth = new Float32Array(width * height),
+      mask = new Uint8Array(width * height),
+      normal = new Float32Array(width * height * 3);
+    const unpack = (p: Uint8Array, s: number) =>
+      p[s] / 255 / 256 ** 3 +
+      p[s + 1] / 255 / 256 ** 2 +
+      p[s + 2] / 255 / 256 +
+      p[s + 3] / 255;
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        const s = ((height - 1 - y) * width + x) * 4,
+          d = y * width + x;
+        frontDepth[d] = unpack(packedFront, s);
+        backDepth[d] = unpack(packedBack, s);
+        mask[d] = frontDepth[d] < 0.999 ? 1 : 0;
+        normal.set(
+          [
+            packedNormal[s] / 127.5 - 1,
+            packedNormal[s + 1] / 127.5 - 1,
+            packedNormal[s + 2] / 127.5 - 1,
+          ],
+          d * 3,
+        );
       }
-    return result;
+    const inverseProjectionView = new THREE.Matrix4()
+      .multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+      .invert();
+    return {
+      width,
+      height,
+      frontDepth,
+      backDepth,
+      mask,
+      normal,
+      inverseProjectionView: new Float32Array(inverseProjectionView.elements),
+    };
   }
   setView(view: "front" | "side" | "back" | "top") {
     if (view === "front" && this.imageSize) {
