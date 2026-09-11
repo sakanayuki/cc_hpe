@@ -350,6 +350,56 @@ export function fitFrontProjection(
   };
 }
 
+/**
+ * Moves the GLB root so that its hips project onto the image pelvis anchor.
+ *
+ * The translation is solved at the hips' existing clip-space depth.  Applying
+ * it to the model root (rather than the hips bone) preserves the complete skin
+ * hierarchy.  Converting both the old and desired root world positions through
+ * the inverse parent matrix also makes this correct below rotated/scaled
+ * parents.
+ */
+export function alignRootToImagePelvis(
+  modelRoot: THREE.Object3D,
+  hips: THREE.Object3D,
+  landmarks: PoseGuidance["landmarks"],
+  imageSize: Size,
+  viewport: Size,
+  camera: THREE.Camera,
+) {
+  if (!landmarks[23] || !landmarks[24] || !viewport.width || !viewport.height)
+    return false;
+  const pelvis = {
+    x: (landmarks[23].x + landmarks[24].x) / 2,
+    y: (landmarks[23].y + landmarks[24].y) / 2,
+  };
+  const pixel = mapLandmarkToContain(
+    pelvis,
+    getContainRect(imageSize, viewport),
+  );
+
+  modelRoot.parent?.updateWorldMatrix(true, false);
+  modelRoot.updateWorldMatrix(true, true);
+  camera.updateWorldMatrix(true, false);
+  const hipsWorld = hips.getWorldPosition(new THREE.Vector3());
+  const clip = hipsWorld.clone().project(camera);
+  const desiredHipsWorld = new THREE.Vector3(
+    (pixel.x / viewport.width) * 2 - 1,
+    1 - (pixel.y / viewport.height) * 2,
+    clip.z,
+  ).unproject(camera);
+  const desiredRootWorld = modelRoot
+    .getWorldPosition(new THREE.Vector3())
+    .add(desiredHipsWorld.sub(hipsWorld));
+  if (modelRoot.parent)
+    desiredRootWorld.applyMatrix4(
+      modelRoot.parent.matrixWorld.clone().invert(),
+    );
+  modelRoot.position.copy(desiredRootWorld);
+  modelRoot.updateWorldMatrix(true, true);
+  return true;
+}
+
 /** The only MediaPipe -> Three/GLB coordinate-system boundary. */
 export function landmarkToModel(
   landmark: { x: number; y: number; z: number },
@@ -504,11 +554,6 @@ export function retargetSkeleton(
     model.updateWorldMatrix(true, true);
     report.appliedBones++;
   }
-  const hips = model.getObjectByName("mixamorig:Hips");
-  if (hips && usable([23, 24], pose)) {
-    const center = average([23, 24], pose, depthScale);
-    hips.position.add(center);
-  }
   model.updateWorldMatrix(true, true);
   return report;
 }
@@ -571,7 +616,7 @@ export class BodyViewer {
     this.corrections.clear();
     this.fit();
     this.retarget();
-    this.alignToImage();
+    this.updateImageAlignment();
     return this.lastReport;
   }
   private lastReport: RetargetReport = {
@@ -601,6 +646,11 @@ export class BodyViewer {
       if (bone) this.posed.set(r.bone, bone.quaternion.clone());
     }
     this.applyProportionsAndCorrections();
+  }
+  private updateImageAlignment() {
+    // Camera fitting and root translation are deliberately separate operations.
+    this.alignToImage();
+    this.alignRootToPelvis();
   }
   private alignToImage() {
     if (!this.model || !this.pose || !this.imageSize) return;
@@ -638,18 +688,24 @@ export class BodyViewer {
       },
       this.camera.fov,
     );
-    const z = new THREE.Box3()
-      .setFromObject(this.model)
-      .getCenter(new THREE.Vector3()).z;
-    // Keep the subject on the front projection plane; camera target handles
-    // the fitted 2D translation while distance supplies the fitted zoom.
-    this.model.position.z -= z;
-    this.model.updateWorldMatrix(true, true);
     this.controls.target.set(result.target.x, result.target.y, 0);
     this.camera.zoom = 1;
     this.camera.updateProjectionMatrix();
     this.camera.position.set(result.target.x, result.target.y, result.distance);
     this.controls.update();
+  }
+  private alignRootToPelvis() {
+    if (!this.model || !this.pose || !this.imageSize) return;
+    const hips = this.model.getObjectByName("mixamorig:Hips");
+    if (!hips) return;
+    alignRootToImagePelvis(
+      this.model,
+      hips,
+      this.pose.landmarks,
+      this.imageSize,
+      { width: this.host.clientWidth, height: this.host.clientHeight },
+      this.camera,
+    );
   }
   private reportAngle = () => {
     const direction = this.camera.position
@@ -665,7 +721,7 @@ export class BodyViewer {
   setDepthScale(v: number) {
     this.depthScale = v;
     this.retarget();
-    this.alignToImage();
+    this.updateImageAlignment();
   }
   setBodyWidth(v: number) {
     this.proportions.width = v;
@@ -682,7 +738,7 @@ export class BodyViewer {
   }
   private rebuildModel() {
     this.retarget(); // fixed order: pose first, then rest-based proportions/corrections
-    this.alignToImage();
+    this.updateImageAlignment();
   }
   private applyProportionsAndCorrections() {
     if (!this.model) return;
@@ -745,17 +801,17 @@ export class BodyViewer {
       }),
     );
     this.applyCorrections();
-    this.alignToImage();
+    this.updateImageAlignment();
   }
   resetJoint(id: JointId) {
     this.corrections.delete(id);
     this.applyCorrections();
-    this.alignToImage();
+    this.updateImageAlignment();
   }
   resetPose() {
     this.corrections.clear();
     this.applyCorrections();
-    this.alignToImage();
+    this.updateImageAlignment();
   }
   private applyCorrections() {
     if (!this.model) return;
@@ -915,7 +971,7 @@ export class BodyViewer {
   }
   setView(view: "front" | "side" | "back" | "top") {
     if (view === "front" && this.imageSize) {
-      this.alignToImage();
+      this.updateImageAlignment();
       return;
     }
     const p = {
@@ -955,7 +1011,7 @@ export class BodyViewer {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h, false);
-    if (this.pose && this.imageSize) this.alignToImage();
+    if (this.pose && this.imageSize) this.updateImageAlignment();
   }
   private loop = () => {
     this.controls.update();
