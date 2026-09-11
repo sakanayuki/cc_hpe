@@ -73,6 +73,11 @@ const referenceImage = byId<HTMLImageElement>("referenceImage");
 const showReference = byId<HTMLInputElement>("showReference");
 const referenceOpacity = byId<HTMLInputElement>("referenceOpacity");
 let referenceUrl: string | undefined;
+const releaseReferenceUrl = () => {
+  if (!referenceUrl) return;
+  URL.revokeObjectURL(referenceUrl);
+  referenceUrl = undefined;
+};
 let frontAngle = 0;
 const updateReference = () => {
   const enabled =
@@ -299,7 +304,7 @@ async function loadFile(file: File): Promise<void> {
   image.src = url;
   try {
     await image.decode();
-    if (referenceUrl) URL.revokeObjectURL(referenceUrl);
+    releaseReferenceUrl();
     referenceUrl = url;
     sourceImage = image;
     pose = undefined;
@@ -322,10 +327,13 @@ async function loadFile(file: File): Promise<void> {
 }
 
 function clear(): void {
-  if (referenceUrl) URL.revokeObjectURL(referenceUrl);
-  referenceUrl = undefined;
+  releaseReferenceUrl();
+  byId<HTMLImageElement>("thumb").removeAttribute("src");
   referenceImage.removeAttribute("src");
   referenceImage.classList.add("hidden");
+  bodyViewer.setVisible(false);
+  viewer.setVisible(false);
+  byId("empty").classList.remove("hidden");
   sourceImage = undefined;
   pose = undefined;
   fileInput.value = "";
