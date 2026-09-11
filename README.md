@@ -5,14 +5,15 @@
 ## 現在の実装範囲（Phase 0 / viewer MVP）
 
 - JPEG / PNG / WebP のローカル読み込み（25 MB 以下）
-- 入力 alpha と簡易背景判定を使った deterministic Gaussian 初期化
+- MediaPipeによる単一人物検出、33点姿勢推定、人物segmentation
+- 背景画素を完全除外し、骨格とsilhouetteに沿う前面・中間・背面の人体proxy生成
 - 最大 500,000 splats、奥行き量の調整
 - 360° orbit viewer と、25°を超えた際の品質警告
 - カラー、深度、不透明度、信頼度のデバッグ表示
 - debug properties 付き binary PLY、32-byte SPLAT のローカル出力
 - TypeScript unit tests、GitHub Pages build/deploy workflows
 
-姿勢推定モデル、FBX/GLBリターゲット、人物segmentation、単眼depthモデル、WebGPU splat renderer、SPZ WASM encoderは後続フェーズです。現時点の画像からの奥行きは、viewer/export経路を検証するための決定論的な近似であり、姿勢推定結果ではありません。
+楕円柱状の旧方式は廃止しました。現在は人物推定に成功しない限り生成しません。FBX/GLBリターゲット、単眼depthモデル、WebGPU splat renderer、SPZ WASM encoderは後続フェーズです。現段階はSHARP相当の最終品質ではなく、骨格を保持した閉じた人体proxyです。
 
 ## 開発
 

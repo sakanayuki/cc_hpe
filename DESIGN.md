@@ -443,3 +443,13 @@ Apple SHARP の出力と同じ入力を目視比較し、依頼者が限定視�
 5. AI生成テスト写真の provenance と acceptance dataset manifest を整備する。
 
 これらが確定すれば、Phase 0 で技術 feasibility を測定し、結果に基づいてモデルと renderer を固定する。特に「単眼 1 枚」「ブラウザのみ」「背面なし」という制約下では、3DGS の名称だけで全周 neural reconstruction を期待させず、**ポーズ済み人体 proxy に沿って入力画素を立体配置する限定視点 representation** として品質を定義することが、実装可能性と利用者期待を一致させる鍵となる。
+
+## 18. 人体再構成への実装改訂
+
+初期MVPの画像全体に楕円形のdepthを与える方式は人体再構成ではないため廃止する。人物推定結果なしのfallbackも禁止し、0人・複数人・maskなし・不完全な骨格ではfail closedとする。
+
+現在のPhase 1では、MediaPipeの33点骨格とsegmentation maskを同時に推定する。背景画素はsplat候補に含めない。maskの境界距離場から局所的な身体半径を求め、骨格線分で補間したzを中心面とし、前面・中間・背面の三層から閉じた人体proxyを作る。これにより写真全体を一様に曲げず、入力人物のsilhouetteと姿勢を保持する。
+
+次のPhase 2では同梱FBXをGLBへ変換し、33点からボーンへretargetしたskinned meshのdepth/normal G-bufferで現在の距離場priorを置き換える。Phase 3では商用利用可能な単眼depthをWebGPUで推論し、顔・髪・衣服のdetailは単眼depth、関節・遮蔽・背面はrig depthを優先して融合する。
+
+リポジトリのSHARP出力は最終品質の目視比較資料とし、学習・変換・アプリ配信には使わない。合格条件は背景splat数0、splat上限遵守、骨長比維持、silhouette IoU、25度orbitでの穴率、およびSHARP出力との同一入力比較とする。

@@ -2,6 +2,7 @@ import './style.css';
 import { imageToCloud, type GaussianCloud } from './gaussian';
 import { download, exportPly, exportSplat } from './exporters';
 import { SplatViewer, type RenderMode } from './viewer';
+import { detectSinglePerson } from './pose';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App root not found');
@@ -62,12 +63,15 @@ async function loadFile(file: File): Promise<void> {
 function clear(): void { sourceImage=undefined;fileInput.value='';byId('thumbWrap').classList.add('hidden');generate.disabled=true;status.textContent='写真を選択してください'; }
 
 generate.addEventListener('click', async () => {
-  if (!sourceImage) return; generate.disabled=true;status.textContent='画像を解析しています…'; await new Promise(requestAnimationFrame);
-  const max=1400, ratio=Math.min(1,max/Math.max(sourceImage.naturalWidth,sourceImage.naturalHeight));
-  const canvas=document.createElement('canvas');canvas.width=Math.round(sourceImage.naturalWidth*ratio);canvas.height=Math.round(sourceImage.naturalHeight*ratio);
-  const context=canvas.getContext('2d',{willReadFrequently:true});if(!context) return;context.drawImage(sourceImage,0,0,canvas.width,canvas.height);
-  cloud=imageToCloud(context.getImageData(0,0,canvas.width,canvas.height),{maxSplats:Number(count.value),depthStrength:Number(depth.value)/100,alphaThreshold:8});
-  viewer.setCloud(cloud);byId('empty').classList.add('hidden');byId('exports').classList.remove('hidden');byId('stats').textContent=`${cloud.count.toLocaleString('ja-JP')} splats`;status.textContent='生成が完了しました';generate.disabled=false;
+  if (!sourceImage) return; generate.disabled=true;status.textContent='人物と骨格を推定しています…'; await new Promise(requestAnimationFrame);
+  try {
+    const pose=await detectSinglePerson(sourceImage);status.textContent='背景を除去し、骨格に沿って立体化しています…';await new Promise(requestAnimationFrame);
+    const max=1400,ratio=Math.min(1,max/Math.max(sourceImage.naturalWidth,sourceImage.naturalHeight));
+    const canvas=document.createElement('canvas');canvas.width=Math.round(sourceImage.naturalWidth*ratio);canvas.height=Math.round(sourceImage.naturalHeight*ratio);
+    const context=canvas.getContext('2d',{willReadFrequently:true});if(!context)throw new Error('画像処理を開始できませんでした。');context.drawImage(sourceImage,0,0,canvas.width,canvas.height);
+    cloud=imageToCloud(context.getImageData(0,0,canvas.width,canvas.height),{maxSplats:Number(count.value),depthStrength:Number(depth.value)/100,alphaThreshold:8},pose);
+    viewer.setCloud(cloud);byId('empty').classList.add('hidden');byId('exports').classList.remove('hidden');byId('stats').textContent=`${cloud.count.toLocaleString('ja-JP')} splats`;status.textContent='人物抽出と骨格ベースの生成が完了しました';
+  } catch(error) { status.textContent=error instanceof Error?error.message:'推定に失敗しました'; } finally { generate.disabled=false; }
 });
 
 byId('ply').addEventListener('click',()=>cloud&&download(exportPly(cloud),'posesplat.ply'));
