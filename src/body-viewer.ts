@@ -608,6 +608,7 @@ function applyWorldDirection(
 function frameFromUpAndRight(
   upValue: THREE.Vector3,
   rightValue: THREE.Vector3,
+  referenceFront?: THREE.Vector3,
 ) {
   const up = upValue.clone().normalize();
   const right = rightValue
@@ -615,8 +616,20 @@ function frameFromUpAndRight(
     .addScaledVector(up, -rightValue.dot(up))
     .normalize();
   if (up.lengthSq() <= EPSILON || right.lengthSq() <= EPSILON) return undefined;
-  const front = right.clone().cross(up).normalize();
+  let front = right.clone().cross(up).normalize();
   if (front.lengthSq() <= EPSILON) return undefined;
+  // A pair of lateral landmarks defines an axis, but noisy depth can select
+  // the frame on the other side of that axis.  Bind-pose front disambiguates
+  // that sign.  Flipping both transverse axes retains `up` and is exactly the
+  // unwanted 180-degree twist around it (rather than a mirror operation).
+  if (
+    referenceFront &&
+    referenceFront.lengthSq() > EPSILON &&
+    front.dot(referenceFront) < 0
+  ) {
+    right.negate();
+    front.negate();
+  }
   return new THREE.Quaternion()
     .setFromRotationMatrix(
       new THREE.Matrix4().makeBasis(right, front.clone().cross(right), front),
@@ -624,7 +637,11 @@ function frameFromUpAndRight(
     .normalize();
 }
 
-function torsoFrames(pose: PoseGuidance, depthScale: number) {
+function torsoFrames(
+  pose: PoseGuidance,
+  depthScale: number,
+  referenceFront: THREE.Vector3,
+) {
   if (!usable([11, 12, 23, 24], pose)) return undefined;
   const hips = average([23, 24], pose, depthScale);
   const shoulders = average([11, 12], pose, depthScale);
@@ -640,6 +657,7 @@ function torsoFrames(pose: PoseGuidance, depthScale: number) {
   const root = frameFromUpAndRight(
     torsoUp,
     hipRight.clone().normalize().add(shoulderRight.clone().normalize()),
+    referenceFront,
   );
   if (!root) return undefined;
 
@@ -648,7 +666,8 @@ function torsoFrames(pose: PoseGuidance, depthScale: number) {
     chestUp = average([7, 8], pose, depthScale).sub(shoulders);
   else if (usable([0], pose))
     chestUp = average([0], pose, depthScale).sub(shoulders);
-  const chest = frameFromUpAndRight(chestUp, shoulderRight) ?? root.clone();
+  const chest =
+    frameFromUpAndRight(chestUp, shoulderRight, referenceFront) ?? root.clone();
   return { root, chest };
 }
 
@@ -671,13 +690,32 @@ export function retargetSkeleton(
     missingBones: [],
     skippedBones: [],
   };
-  const bodyFrames = torsoFrames(pose, depthScale);
+  const hipsRest = rest.get("mixamorig:Hips");
+  const hipsRestFrame = hipsRest && restFrame(hipsRest);
+  // The authored bind pose is the only reliable definition of model front.
+  // Use it before constructing any torso targets so every descendant observes
+  // the same, already-disambiguated pelvis/chest world frames.
+  const referenceFront = hipsRestFrame
+    ? new THREE.Vector3(0, 0, 1).applyQuaternion(hipsRestFrame).normalize()
+    : new THREE.Vector3(0, 0, 1);
+  const bodyFrames = torsoFrames(pose, depthScale, referenceFront);
   const torsoWeights: Partial<Record<JointId, number>> = {
     hips: 0,
     spine: 1 / 3,
     spine1: 2 / 3,
     chest: 1,
   };
+  const torsoTargets = new Map<JointId, THREE.Quaternion>();
+  if (bodyFrames) {
+    for (const [id, weight] of Object.entries(torsoWeights) as [
+      JointId,
+      number,
+    ][])
+      torsoTargets.set(
+        id,
+        bodyFrames.root.clone().slerp(bodyFrames.chest, weight).normalize(),
+      );
+  }
 
   // Always reset the whole chain first: repeated calls must never accumulate.
   for (const rule of RULES) {
@@ -706,14 +744,10 @@ export function retargetSkeleton(
       continue;
     }
     let desiredWorld: THREE.Quaternion | undefined;
-    const torsoWeight = torsoWeights[rule.id];
-    if (torsoWeight !== undefined && bodyFrames) {
+    const targetFrame = torsoTargets.get(rule.id);
+    if (targetFrame) {
       // Interpolated *world* frames distribute bend/twist along the chain;
       // applying one torso quaternion to every local bone would compound it.
-      const targetFrame = bodyFrames.root
-        .clone()
-        .slerp(bodyFrames.chest, torsoWeight)
-        .normalize();
       const sourceFrame = restFrame(saved);
       if (sourceFrame) {
         const restCorrection = sourceFrame
