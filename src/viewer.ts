@@ -10,6 +10,8 @@ export type RenderMode =
   | "confidence"
   | "source";
 
+export const VIEWER_BACKGROUND = { dark: 0x121018, light: 0xf4f1f8 } as const;
+
 /** Instanced, covariance-projected Gaussian renderer. Unlike THREE.Points this honors every splat's scale and quaternion. */
 export class SplatViewer {
   private renderer: THREE.WebGLRenderer;
@@ -36,7 +38,7 @@ export class SplatViewer {
       powerPreference: "high-performance",
     });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    this.renderer.setClearColor(0x121018, 1);
+    this.setBackgroundColor(VIEWER_BACKGROUND.dark);
     host.append(this.renderer.domElement);
     this.camera.position.set(0, 0, 3.5);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -233,6 +235,9 @@ void main(){vUv=position.xy;vColor=splatColor;vColor.a*=splatOpacity;vDepth=spla
   }
   setVisible(v: boolean) {
     this.renderer.domElement.hidden = !v;
+  }
+  setBackgroundColor(color: THREE.ColorRepresentation) {
+    this.renderer.setClearColor(color, 1);
   }
   reset() {
     this.camera.position.set(0, 0, 3.5);

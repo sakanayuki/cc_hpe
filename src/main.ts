@@ -17,12 +17,15 @@ import {
   type HipFacing,
   type JointId,
 } from "./body-viewer";
+import { initializeTheme, themeButtonText, THEME_COLORS } from "./theme";
+
+const theme = initializeTheme();
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root not found");
 
 app.innerHTML = `
-  <header><a class="brand" href="#"><span class="mark">PS</span><span>PoseSplat <b>Studio</b></span></a><div class="local"><i></i> ローカル処理のみ</div></header>
+  <header><a class="brand" href="#"><span class="mark">PS</span><span>PoseSplat <b>Studio</b></span></a><div class="header-actions"><div class="local"><i></i> ローカル処理のみ</div><button id="themeToggle" class="theme-toggle" type="button"><span aria-hidden="true"></span><span class="theme-label">テーマ</span></button></div></header>
   <main>
     <section class="hero" aria-labelledby="title"><div><p class="eyebrow">BROWSER-ONLY 3D CREATION</p><h1 id="title">一枚の写真に、<br><em>奥行きを。</em></h1><p class="lead">人物写真から姿勢と深度を推定し、Gaussian Splatとして立体化します。画像が端末の外に送信されることはありません。</p></div><div class="chips"><span>WebGPU</span><span>最大 500K splats</span><span>PLY / SPLAT</span></div></section>
     <section class="workspace">
@@ -117,6 +120,22 @@ const viewer = new SplatViewer(
     output.classList.toggle("bad", fps < 30);
   },
 );
+const themeToggle = byId<HTMLButtonElement>("themeToggle");
+const syncTheme = () => {
+  const copy = themeButtonText(theme.current);
+  themeToggle.setAttribute("aria-label", copy.label);
+  themeToggle.title = copy.title;
+  themeToggle.setAttribute("aria-pressed", String(theme.current === "light"));
+  themeToggle.querySelector("[aria-hidden]")!.textContent =
+    theme.current === "dark" ? "☾" : "☀";
+  viewer.setBackgroundColor(THEME_COLORS[theme.current]);
+  bodyViewer.setTheme(theme.current);
+};
+themeToggle.addEventListener("click", () => {
+  theme.toggle();
+  syncTheme();
+});
+syncTheme();
 viewer.setVisible(false);
 minConfidence.addEventListener("input", () => {
   byId<HTMLOutputElement>("minConfidenceOut").value = `${minConfidence.value}%`;
@@ -307,9 +326,10 @@ function drawPoseOverlay(guidance: PoseGuidance) {
     { width: sourceImage.naturalWidth, height: sourceImage.naturalHeight },
     { width: w, height: h },
   );
-  c.strokeStyle = "#c7a8ff";
+  const styles = getComputedStyle(document.documentElement);
+  c.strokeStyle = styles.getPropertyValue("--skeleton").trim();
   c.lineWidth = 2;
-  c.fillStyle = "#ff9bd2";
+  c.fillStyle = styles.getPropertyValue("--joint-marker").trim();
   for (const [a, b] of SKELETON) {
     const p = guidance.landmarks[a],
       q = guidance.landmarks[b];
