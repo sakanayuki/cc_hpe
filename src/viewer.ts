@@ -87,8 +87,8 @@ export class SplatViewer {
     geometry.setAttribute(
       "position",
       new THREE.Float32BufferAttribute(
-        [-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1],
-        2,
+        [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, 1, 1, 0, -1, 1, 0],
+        3,
       ),
     );
     geometry.setAttribute(
@@ -131,6 +131,31 @@ export class SplatViewer {
       new THREE.InstancedBufferAttribute(reorder(cloud.layer, 1, order), 1),
     );
     geometry.instanceCount = cloud.count;
+    const bounds = new THREE.Box3().setFromBufferAttribute(
+      geometry.getAttribute("splatPosition") as THREE.BufferAttribute,
+    );
+    const center = bounds.getCenter(new THREE.Vector3());
+    let radius = 0;
+    for (let i = 0; i < cloud.count; i++) {
+      const offset = i * 3;
+      radius = Math.max(
+        radius,
+        center.distanceTo(
+          new THREE.Vector3(
+            cloud.position[offset],
+            cloud.position[offset + 1],
+            cloud.position[offset + 2],
+          ),
+        ) +
+          3 *
+            Math.max(
+              cloud.scale[offset],
+              cloud.scale[offset + 1],
+              cloud.scale[offset + 2],
+            ),
+      );
+    }
+    geometry.boundingSphere = new THREE.Sphere(center, radius);
     const material = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
@@ -151,7 +176,6 @@ void main(){vUv=position.xy;vColor=splatColor;vColor.a*=splatOpacity;vDepth=spla
       fragmentShader: `precision highp float;uniform int mode;varying vec2 vUv;varying vec4 vColor;varying float vDepth,vConfidence,vLayer,vVisible;void main(){if(vVisible<.5)discard;float alpha=exp(-.5*dot(vUv,vUv)*9.)*vColor.a;if(alpha<.004)discard;vec3 c=vColor.rgb;if(mode==1)c=mix(vec3(.16,.08,.48),vec3(.18,1.,.72),clamp(vDepth*3.+.5,0.,1.));else if(mode==2)c=vec3(vColor.a);else if(mode==3)c=mix(vec3(1.,.12,.22),vec3(.2,1.,.55),vConfidence);else if(mode==4)c=vLayer<.5?vec3(.2,1.,.65):vLayer<1.5?vec3(1.,.55,.2):vec3(.7,.48,1.);gl_FragColor=vec4(c,alpha);}`,
     });
     this.mesh = new THREE.Mesh(geometry, material);
-    this.mesh.frustumCulled = false;
     this.scene.add(this.mesh);
     this.resize();
   }

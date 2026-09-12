@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { cleanupCloud, GaussianSource, imageToCloud } from "./gaussian";
+import {
+  cleanupCloud,
+  formatEstimatedPlySize,
+  GaussianSource,
+  imageToCloud,
+} from "./gaussian";
 import { exportPly, exportSplat, exportSpz } from "./exporters";
 
 const landmarks = Array.from({ length: 33 }, (_, i) => ({
@@ -36,6 +41,16 @@ const cloud = imageToCloud(
 );
 
 describe("pose-guided Gaussian pipeline", () => {
+  it("returns finite, consistently-sized geometry and a visible small-cloud estimate", () => {
+    expect(cloud.count).toBeGreaterThan(0);
+    expect(cloud.position).toHaveLength(cloud.count * 3);
+    expect(cloud.scale).toHaveLength(cloud.count * 3);
+    expect(cloud.rotation).toHaveLength(cloud.count * 4);
+    expect([...cloud.position].every(Number.isFinite)).toBe(true);
+    expect([...cloud.scale].every(Number.isFinite)).toBe(true);
+    expect([...cloud.rotation].every(Number.isFinite)).toBe(true);
+    expect(formatEstimatedPlySize(cloud.count)).toMatch(/^[1-9]\d* KiB$/);
+  });
   it("rejects near-zero homogeneous w instead of emitting invalid positions", () => {
     const invalid = pose(new Float32Array([1, 1, 1, 1]));
     invalid.rigSurface.inverseProjectionView.fill(0);
