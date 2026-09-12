@@ -28,6 +28,102 @@ const pose = {
 } satisfies PoseGuidance;
 
 describe("GLB pose retargeting", () => {
+  const makeFrontFacingRig = () => {
+    const hips = new THREE.Bone();
+    hips.name = "mixamorig:Hips";
+    hips.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
+    const add = (parent: THREE.Bone, name: string, position: THREE.Vector3) => {
+      const bone = new THREE.Bone();
+      bone.name = name;
+      bone.position.copy(position);
+      parent.add(bone);
+      return bone;
+    };
+    const spine = add(hips, "mixamorig:Spine", new THREE.Vector3(0, 1, 0));
+    const spine1 = add(spine, "mixamorig:Spine1", new THREE.Vector3(0, 1, 0));
+    const chest = add(spine1, "mixamorig:Spine2", new THREE.Vector3(0, 1, 0));
+    const leftShoulder = add(
+      chest,
+      "mixamorig:LeftShoulder",
+      new THREE.Vector3(0.5, 0.3, 0),
+    );
+    add(leftShoulder, "mixamorig:LeftArm", new THREE.Vector3(0.5, 0, 0));
+    const rightShoulder = add(
+      chest,
+      "mixamorig:RightShoulder",
+      new THREE.Vector3(-0.5, 0.3, 0),
+    );
+    add(rightShoulder, "mixamorig:RightArm", new THREE.Vector3(-0.5, 0, 0));
+    const leftLeg = add(
+      hips,
+      "mixamorig:LeftUpLeg",
+      new THREE.Vector3(-0.3, 0, 0),
+    );
+    add(leftLeg, "mixamorig:LeftLeg", new THREE.Vector3(0, -1, 0));
+    const rightLeg = add(
+      hips,
+      "mixamorig:RightUpLeg",
+      new THREE.Vector3(0.3, 0, 0),
+    );
+    add(rightLeg, "mixamorig:RightLeg", new THREE.Vector3(0, -1, 0));
+    hips.updateWorldMatrix(true, true);
+    return { hips, chest, leftShoulder, rightShoulder, leftLeg, rightLeg };
+  };
+
+  const frontalPose = (depthOffset = 0) => {
+    const p: PoseGuidance = structuredClone(pose);
+    const put = (index: number, x: number, y: number, z: number) => {
+      p.worldLandmarks[index] = { x, y: -y, z: -z, visibility: 1 };
+    };
+    put(23, -0.35, 0, depthOffset);
+    put(24, 0.35, 0, -depthOffset);
+    put(11, -0.7, 2, -depthOffset);
+    put(12, 0.7, 2, depthOffset);
+    put(7, -0.1, 3, 0);
+    put(8, 0.1, 3, 0);
+    put(25, -0.35, -1, depthOffset);
+    put(26, 0.35, -1, -depthOffset);
+    return p;
+  };
+
+  it("keeps frontal torso and proximal limbs in the GLB bind-front hemisphere", () => {
+    const rig = makeFrontFacingRig();
+    const rest = captureRestPose(rig.hips);
+    const referenceFront = new THREE.Vector3(0, 0, 1).applyQuaternion(
+      rest.get("mixamorig:Hips")!.worldQuaternion,
+    );
+
+    retargetSkeleton(rig.hips, frontalPose(), rest);
+
+    for (const bone of [rig.hips, rig.chest]) {
+      const front = new THREE.Vector3(0, 0, 1).applyQuaternion(
+        bone.getWorldQuaternion(new THREE.Quaternion()),
+      );
+      expect(front.dot(referenceFront)).toBeGreaterThan(0);
+    }
+    for (const bone of [
+      rig.leftLeg,
+      rig.rightLeg,
+      rig.leftShoulder,
+      rig.rightShoulder,
+    ]) {
+      const front = new THREE.Vector3(0, 0, 1).applyQuaternion(
+        bone.getWorldQuaternion(new THREE.Quaternion()),
+      );
+      expect(front.dot(referenceFront)).toBeGreaterThan(0.99);
+    }
+  });
+
+  it("does not flip torso frame sign when left and right move slightly in depth", () => {
+    const rig = makeFrontFacingRig();
+    const rest = captureRestPose(rig.hips);
+    retargetSkeleton(rig.hips, frontalPose(-0.01), rest);
+    const before = rig.hips.getWorldQuaternion(new THREE.Quaternion());
+    retargetSkeleton(rig.hips, frontalPose(0.01), rest);
+    const after = rig.hips.getWorldQuaternion(new THREE.Quaternion());
+    expect(Math.abs(before.dot(after))).toBeGreaterThan(0.999);
+  });
+
   it("uses 3D world-landmark depth instead of flattened image coordinates", () => {
     pose.worldLandmarks[11] = { x: 0, y: 0, z: 0, visibility: 1 };
     pose.worldLandmarks[13] = { x: 1, y: 0, z: 1, visibility: 1 };
