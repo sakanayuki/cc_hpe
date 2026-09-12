@@ -55,6 +55,27 @@ export class SplatViewer {
     this.loop();
   }
   setCloud(cloud: GaussianCloud) {
+    if (!Number.isInteger(cloud.count) || cloud.count <= 0)
+      throw new Error("Gaussian cloudの点数が不正です。");
+    const expected = {
+      position: 3,
+      scale: 3,
+      rotation: 4,
+      color: 4,
+      opacity: 1,
+      depth: 1,
+      confidence: 1,
+      layer: 1,
+    } as const;
+    for (const [name, size] of Object.entries(expected)) {
+      const data = cloud[name as keyof typeof expected] as
+        | Float32Array
+        | Uint8Array;
+      if (!data || data.length !== cloud.count * size)
+        throw new Error(`Gaussian cloudの${name}配列長が不正です。`);
+      if (data instanceof Float32Array && !data.every(Number.isFinite))
+        throw new Error(`Gaussian cloudの${name}に非有限値があります。`);
+    }
     this.cloud = cloud;
     const order = this.order();
     if (this.mesh) {
