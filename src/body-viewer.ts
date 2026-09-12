@@ -368,6 +368,63 @@ export type FrontAlignment = {
   normalizedRmsError: number;
 };
 
+export type CameraState = {
+  position: THREE.Vector3;
+  quaternion: THREE.Quaternion;
+  zoom: number;
+  target: THREE.Vector3;
+};
+
+type CameraControls = { target: THREE.Vector3; update(): void };
+
+/** Captures all user-controlled orbit, pan, and zoom state. */
+export function captureCameraState(
+  camera: THREE.PerspectiveCamera,
+  controls: Pick<CameraControls, "target">,
+): CameraState {
+  return {
+    position: camera.position.clone(),
+    quaternion: camera.quaternion.clone(),
+    zoom: camera.zoom,
+    target: controls.target.clone(),
+  };
+}
+
+/** Restores a snapshot without leaving OrbitControls' internal orbit out of sync. */
+export function restoreCameraState(
+  camera: THREE.PerspectiveCamera,
+  controls: CameraControls,
+  state: CameraState,
+) {
+  controls.target.copy(state.target);
+  camera.position.copy(state.position);
+  camera.zoom = state.zoom;
+  camera.updateProjectionMatrix();
+  controls.update();
+  // Synchronization can advance damping, so copy every value again to retain
+  // the exact snapshot as part of the public guarantee.
+  controls.target.copy(state.target);
+  camera.position.copy(state.position);
+  camera.quaternion.copy(state.quaternion);
+  camera.zoom = state.zoom;
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld();
+}
+
+/** Runs a model edit while guaranteeing that the user's camera is untouched. */
+export function preservingCameraState<T>(
+  camera: THREE.PerspectiveCamera,
+  controls: CameraControls,
+  edit: () => T,
+): T {
+  const state = captureCameraState(camera, controls);
+  try {
+    return edit();
+  } finally {
+    restoreCameraState(camera, controls, state);
+  }
+}
+
 /** Least-squares front-view fit (translation + uniform camera zoom). */
 export function fitFrontProjection(
   modelPoints: Point[],
@@ -990,7 +1047,7 @@ export class BodyViewer {
     this.corrections.clear();
     this.fit();
     this.retarget();
-    this.updateImageAlignment();
+    this.initializeImageAlignment();
     return this.lastReport;
   }
   private lastReport: RetargetReport = {
@@ -1023,7 +1080,8 @@ export class BodyViewer {
     }
     this.applyProportionsAndCorrections();
   }
-  private updateImageAlignment() {
+  /** Initial image fit; call only when loading a pose or choosing front/reset. */
+  private initializeImageAlignment() {
     // Camera fitting and root translation are deliberately separate operations.
     this.alignToImage();
     this.alignRootToPelvis();
@@ -1101,9 +1159,10 @@ export class BodyViewer {
     );
   };
   setDepthScale(v: number) {
-    this.depthScale = v;
-    this.retarget();
-    this.updateImageAlignment();
+    this.preserveCamera(() => {
+      this.depthScale = v;
+      this.retarget();
+    });
   }
   setHipFacing(value: HipFacing) {
     if (this.hipFacing === value) return;
@@ -1124,8 +1183,9 @@ export class BodyViewer {
     this.rebuildModel();
   }
   private rebuildModel() {
-    this.retarget(); // fixed order: pose first, then rest-based proportions/corrections
-    this.updateImageAlignment();
+    this.preserveCamera(() => {
+      this.retarget(); // fixed order: pose first, then rest-based proportions/corrections
+    });
   }
   private applyProportionsAndCorrections() {
     if (!this.model) return;
@@ -1187,18 +1247,18 @@ export class BodyViewer {
         translation: new THREE.Vector3(...translation),
       }),
     );
-    this.applyCorrections();
-    this.updateImageAlignment();
+    this.preserveCamera(() => this.applyCorrections());
   }
   resetJoint(id: JointId) {
     this.corrections.delete(id);
-    this.applyCorrections();
-    this.updateImageAlignment();
+    this.preserveCamera(() => this.applyCorrections());
   }
   resetPose() {
     this.corrections.clear();
-    this.applyCorrections();
-    this.updateImageAlignment();
+    this.preserveCamera(() => this.applyCorrections());
+  }
+  private preserveCamera<T>(edit: () => T): T {
+    return preservingCameraState(this.camera, this.controls, edit);
   }
   private applyCorrections() {
     if (!this.model) return;
@@ -1360,7 +1420,7 @@ export class BodyViewer {
   }
   setView(view: "front" | "side" | "back" | "top") {
     if (view === "front" && this.imageSize) {
-      this.updateImageAlignment();
+      this.initializeImageAlignment();
       return;
     }
     const p = {
@@ -1400,7 +1460,6 @@ export class BodyViewer {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h, false);
-    if (this.pose && this.imageSize) this.updateImageAlignment();
   }
   private loop = () => {
     this.controls.update();
