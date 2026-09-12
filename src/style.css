@@ -474,12 +474,22 @@ kbd {
   }
   .workspace {
     grid-template-columns: 1fr;
+    gap: 12px;
+    display: flex;
+    flex-direction: column;
   }
   .thumb-wrap {
     max-height: min(440px, 65vh);
   }
+  .viewer-card {
+    order: -1;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    box-shadow: 0 12px 35px #000a;
+  }
   .viewer {
-    height: 420px;
+    height: clamp(210px, 42dvh, 360px);
   }
   .exports {
     display: block;
@@ -513,16 +523,7 @@ kbd {
   margin-top: 22px;
 }
 .pose-controls {
-  margin-top: 16px;
-  padding: 14px;
-  border: 1px solid #393244;
-  border-radius: 14px;
-  background: #15121a;
-}
-.pose-controls h3 {
-  font-size: 11px;
-  margin: 0;
-  color: #d8c9ff;
+  display: contents;
 }
 .pose-controls .field {
   margin: 13px 0;
@@ -564,20 +565,33 @@ kbd {
   color: #e5dcef;
 }
 .joint-axes {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
   margin-top: 10px;
 }
-.joint-axes label span {
-  display: flex;
-  justify-content: space-between;
+.joint-axes label {
+  min-height: 40px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 45px;
+  align-items: center;
+  gap: 8px;
+}
+.joint-axes label span,
+.joint-axes label output {
   font-size: 9px;
   color: #aaa2b5;
 }
 .joint-axes input {
   width: 100%;
+  height: 32px;
+  margin: 0;
   accent-color: #a280ff;
+}
+.joint-axes output {
+  text-align: right;
+  color: var(--violet) !important;
+  font-variant-numeric: tabular-nums;
 }
 .thumb-wrap canvas {
   position: absolute;
@@ -641,4 +655,159 @@ kbd {
 }
 .viewer-footer #fps + #stats {
   margin-left: 0;
+}
+
+.control-section {
+  margin: 0 0 10px;
+  border: 1px solid #393244;
+  border-radius: 14px;
+  background: #15121a;
+  overflow: clip;
+}
+.control-section summary {
+  min-height: 52px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #d8c9ff;
+  cursor: pointer;
+  list-style: none;
+}
+.control-section summary::-webkit-details-marker {
+  display: none;
+}
+.control-section summary::after {
+  content: "+";
+  margin-left: auto;
+  color: #8f819d;
+  font-size: 18px;
+}
+.control-section[open] summary::after {
+  content: "−";
+}
+.control-section summary > span:not(.step-number) {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+}
+.control-section summary > small,
+.control-section summary span small {
+  color: #81798c;
+  font-size: 9px;
+}
+.step-number {
+  flex: 0 0 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #514461;
+  border-radius: 9px;
+  color: var(--violet);
+  font-size: 10px;
+  font-weight: 800;
+}
+.section-content {
+  padding: 4px 14px 14px;
+}
+.axis-group {
+  min-width: 0;
+  margin: 14px 0 0;
+  padding: 0;
+  border: 0;
+}
+.axis-group legend {
+  padding: 0;
+  color: #aaa2b5;
+  font-size: 10px;
+  font-weight: 700;
+}
+.photo-section .thumb-wrap,
+.photo-section .drop {
+  margin-bottom: 8px;
+}
+
+@media (max-width: 800px) {
+  header {
+    height: 58px;
+    padding: 0 14px;
+  }
+  .local {
+    padding: 7px 9px;
+    font-size: 10px;
+  }
+  main {
+    padding: 26px 12px;
+  }
+  .hero {
+    margin-bottom: 24px;
+  }
+  .controls {
+    padding: 12px;
+  }
+  .toolbar {
+    min-height: 52px;
+    height: auto;
+    padding: 6px 8px;
+  }
+  .toolbar > div {
+    flex-wrap: wrap;
+    gap: 5px 8px;
+  }
+  .toolbar > div > b {
+    flex-basis: 100%;
+  }
+  .segmented button,
+  .icon-button {
+    min-height: 36px;
+    padding: 7px 10px;
+  }
+  .viewer-footer {
+    height: 34px;
+    gap: 9px;
+    padding: 0 9px;
+  }
+  .control-section summary {
+    min-height: 48px;
+  }
+  .joint-field {
+    min-height: 44px;
+  }
+  .joint-field select {
+    min-height: 40px;
+  }
+  .edit-actions {
+    flex-direction: column;
+  }
+  .edit-actions button {
+    min-height: 42px;
+  }
+}
+
+@media (max-width: 800px) and (orientation: landscape) {
+  .viewer {
+    height: clamp(120px, 34dvh, 210px);
+  }
+  .viewer-footer {
+    display: none;
+  }
+  .toolbar > div > b {
+    flex-basis: auto;
+  }
+}
+
+@media (max-width: 430px) {
+  .brand {
+    font-size: 15px;
+  }
+  .viewer-card,
+  .panel {
+    border-radius: 15px;
+  }
+  .viewer-filters {
+    flex-wrap: wrap;
+  }
+  .viewer-footer span:nth-child(-n + 2) {
+    display: none;
+  }
 }
