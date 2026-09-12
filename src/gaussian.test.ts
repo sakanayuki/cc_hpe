@@ -32,6 +32,12 @@ const pose = (mask: Float32Array) => ({
     inverseProjectionView: new Float32Array([
       0.01, 0, 0, 0, 0, 0.01, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
     ]),
+    camera: {
+      position: [0, 0, 3] as [number, number, number],
+      target: [0, 0, 0] as [number, number, number],
+      frontAngleDegrees: 0,
+      projectionMatrixFinite: true,
+    },
   },
 });
 const cloud = imageToCloud(
@@ -116,6 +122,32 @@ describe("pose-guided Gaussian pipeline", () => {
       pose(new Float32Array([1, 1, 1, 1])),
     );
     expect(limited.count).toBeLessThanOrEqual(4);
+  });
+  it("reports intermediate masks, budgets, G-buffer and cleanup statistics", () => {
+    let diagnostics;
+    imageToCloud(
+      { data: pixels, width: 2, height: 2 } as ImageData,
+      { maxSplats: 8, depthStrength: 1, alphaThreshold: 8 },
+      pose(new Float32Array([0, 1, 0, 1])),
+      (value) => {
+        diagnostics = structuredClone(value);
+      },
+    );
+    expect(diagnostics).toMatchObject({
+      imageWidth: 2,
+      imageHeight: 2,
+      requestedMaxPoints: 8,
+      personMaskPixels: 2,
+      glbMaskPixels: 4,
+      intersectionPixels: 2,
+    });
+    expect(diagnostics!.frontDepth).toMatchObject({
+      validPixels: 4,
+      min: expect.any(Number),
+      max: expect.any(Number),
+    });
+    expect(diagnostics!.camera.projectionMatrixFinite).toBe(true);
+    expect(diagnostics!.finalPoints).toBeGreaterThan(0);
   });
   it("rejects an incomplete skeleton instead of using a cylindrical fallback", () => {
     expect(() =>

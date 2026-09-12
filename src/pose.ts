@@ -46,6 +46,12 @@ export interface RigSurfaceBuffer {
   /** View-space XYZ normal, three floats per pixel. */
   normal: Float32Array;
   inverseProjectionView: Float32Array;
+  camera: {
+    position: [number, number, number];
+    target: [number, number, number];
+    frontAngleDegrees: number;
+    projectionMatrixFinite: boolean;
+  };
 }
 
 let instance: Promise<PoseLandmarker> | undefined;

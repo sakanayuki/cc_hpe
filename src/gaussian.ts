@@ -24,6 +24,33 @@ export interface BuildOptions {
   depthStrength: number;
   alphaThreshold: number;
 }
+export interface CloudDiagnostics {
+  imageWidth: number;
+  imageHeight: number;
+  requestedMaxPoints: number;
+  personMaskPixels: number;
+  glbMaskPixels: number;
+  intersectionPixels: number;
+  intersectionRate: number;
+  stride: number;
+  frontBudget: number;
+  rearBudget: number;
+  frontGenerated: number;
+  rearGenerated: number;
+  cleanupRemoved: {
+    invalid: number;
+    depthOutlier: number;
+    duplicate: number;
+    budget: number;
+  };
+  finalPoints: number;
+  frontDepth: { validPixels: number; min: number | null; max: number | null };
+  backDepth: { validPixels: number; min: number | null; max: number | null };
+  camera: RigSurfaceBuffer["camera"];
+}
+export type DiagnosticCollector = (
+  diagnostics: Readonly<CloudDiagnostics>,
+) => void;
 
 type Splat = {
   p: [number, number, number];
@@ -99,7 +126,11 @@ function sampleMask(
 }
 
 /** Removes bad geometry and merges duplicate samples without changing provenance. */
-export function cleanupCloud(points: Splat[], pixelWorldSize: number): Splat[] {
+export function cleanupCloud(
+  points: Splat[],
+  pixelWorldSize: number,
+  removed?: CloudDiagnostics["cleanupRemoved"],
+): Splat[] {
   const finite = points.filter(
     (v) =>
       v.opacity >= 0.04 &&
@@ -112,6 +143,7 @@ export function cleanupCloud(points: Splat[], pixelWorldSize: number): Splat[] {
       Number.isFinite(Math.hypot(...v.q)) &&
       Math.hypot(...v.q) > 1e-6,
   );
+  if (removed) removed.invalid += points.length - finite.length;
   if (!finite.length) return [];
   const zs = finite.map((v) => v.p[2]).sort((a, b) => a - b),
     lo = zs[Math.floor(zs.length * 0.005)],
@@ -119,11 +151,16 @@ export function cleanupCloud(points: Splat[], pixelWorldSize: number): Splat[] {
   const vox = Math.max(1e-5, pixelWorldSize * 0.45),
     seen = new Map<string, Splat>();
   for (const v of finite) {
-    if (v.p[2] < lo - pixelWorldSize * 2 || v.p[2] > hi + pixelWorldSize * 2)
+    if (v.p[2] < lo - pixelWorldSize * 2 || v.p[2] > hi + pixelWorldSize * 2) {
+      if (removed) removed.depthOutlier++;
       continue;
+    }
     const key = `${v.source}:${Math.round(v.p[0] / vox)},${Math.round(v.p[1] / vox)},${Math.round(v.p[2] / vox)}`;
     const old = seen.get(key);
-    if (!old || v.confidence > old.confidence) seen.set(key, v);
+    if (!old || v.confidence > old.confidence) {
+      if (old && removed) removed.duplicate++;
+      seen.set(key, v);
+    } else if (removed) removed.duplicate++;
   }
   return [...seen.values()];
 }
@@ -133,6 +170,7 @@ export function imageToCloud(
   image: ImageData,
   options: BuildOptions,
   pose: PoseGuidance,
+  collect?: DiagnosticCollector,
 ): GaussianCloud {
   if (pose.landmarks.length < 29)
     throw new Error("人体骨格が不完全なため立体化できません。");
@@ -140,6 +178,46 @@ export function imageToCloud(
   if (!g) throw new Error("姿勢付きmeshのG-bufferが必要です。");
   if (g.width !== image.width || g.height !== image.height)
     throw new Error("G-bufferと元画像のアスペクト・解像度が一致しません。");
+  const depthStats = (depth: Float32Array) => {
+    let validPixels = 0,
+      min = Infinity,
+      max = -Infinity;
+    for (const value of depth)
+      if (Number.isFinite(value) && value < 0.999) {
+        validPixels++;
+        min = Math.min(min, value);
+        max = Math.max(max, value);
+      }
+    return {
+      validPixels,
+      min: validPixels ? min : null,
+      max: validPixels ? max : null,
+    };
+  };
+  const personMaskPixels = [...pose.mask].filter(
+    (value) => value > 0.35,
+  ).length;
+  const glbMaskPixels = [...g.mask].filter(Boolean).length;
+  const diagnostics: CloudDiagnostics = {
+    imageWidth: image.width,
+    imageHeight: image.height,
+    requestedMaxPoints: options.maxSplats,
+    personMaskPixels,
+    glbMaskPixels,
+    intersectionPixels: 0,
+    intersectionRate: 0,
+    stride: 0,
+    frontBudget: 0,
+    rearBudget: 0,
+    frontGenerated: 0,
+    rearGenerated: 0,
+    cleanupRemoved: { invalid: 0, depthOutlier: 0, duplicate: 0, budget: 0 },
+    finalPoints: 0,
+    frontDepth: depthStats(g.frontDepth),
+    backDepth: depthStats(g.backDepth),
+    camera: g.camera,
+  };
+  collect?.(diagnostics);
   const candidates: number[] = [];
   for (let i = 0; i < image.width * image.height; i++) {
     const x = i % image.width,
@@ -151,6 +229,11 @@ export function imageToCloud(
     )
       candidates.push(i);
   }
+  diagnostics.intersectionPixels = candidates.length;
+  diagnostics.intersectionRate = personMaskPixels
+    ? candidates.length / personMaskPixels
+    : 0;
+  collect?.(diagnostics);
   if (!candidates.length)
     throw new Error("人物領域と姿勢付きmeshを対応付けできませんでした。");
   const rearBudget = Math.min(
@@ -159,6 +242,7 @@ export function imageToCloud(
   );
   const frontBudget = Math.max(1, options.maxSplats - rearBudget),
     stride = Math.max(1, Math.ceil(candidates.length / frontBudget));
+  Object.assign(diagnostics, { rearBudget, frontBudget, stride });
   const points: Splat[] = [];
   let pixelWorld = 0.005;
   for (let k = 0; k < candidates.length; k += stride) {
@@ -248,7 +332,18 @@ export function imageToCloud(
       });
     }
   }
-  const clean = cleanupCloud(points, pixelWorld).slice(0, options.maxSplats),
+  diagnostics.frontGenerated = points.filter(
+    (point) => point.source === GaussianSource.ObservedSurface,
+  ).length;
+  diagnostics.rearGenerated = points.filter(
+    (point) => point.source === GaussianSource.InferredBack,
+  ).length;
+  const cleaned = cleanupCloud(points, pixelWorld, diagnostics.cleanupRemoved);
+  diagnostics.cleanupRemoved.budget = Math.max(
+    0,
+    cleaned.length - options.maxSplats,
+  );
+  const clean = cleaned.slice(0, options.maxSplats),
     n = clean.length,
     position = new Float32Array(n * 3),
     scale = new Float32Array(n * 3),
@@ -258,6 +353,8 @@ export function imageToCloud(
     depth = new Float32Array(n),
     confidence = new Float32Array(n),
     layer = new Uint8Array(n);
+  diagnostics.finalPoints = n;
+  collect?.(diagnostics);
   if (!n)
     throw new Error(
       "有効な3D点が残りませんでした。深度または姿勢データを確認してください。",
