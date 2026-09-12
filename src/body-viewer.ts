@@ -360,8 +360,8 @@ export const EDITABLE_JOINTS = RULES.map((r) => r.id);
 
 const MIN_VISIBILITY = 0.45;
 const EPSILON = 1e-6;
-/** Mixamo's head bind pose needs this local-space offset after pose estimation. */
-export const HEAD_BIND_POSE_X_CORRECTION = Math.PI / 2;
+/** Mixamo's head bind pose needs a local-space X軸 -90° offset after pose estimation. */
+export const HEAD_BIND_POSE_X_CORRECTION = -Math.PI / 2;
 
 export type FrontAlignment = {
   target: Point;
