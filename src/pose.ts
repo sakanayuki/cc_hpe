@@ -124,32 +124,53 @@ export function associateHands(
     if (!imageMirrored) label = label === "left" ? "right" : "left";
     return [{ hand, sourceIndex, confidence, label, imageDiagonal }];
   });
-  const output: HandsGuidance = {};
-  const used = new Set<number>();
-  for (const [side, wristIndex] of [
+  const sides = [
     ["left", 15],
     ["right", 16],
-  ] as const) {
+  ] as const;
+  const options = sides.map(([side, wristIndex]) => {
     const wrist = poseLandmarks[wristIndex];
-    if (!wrist) continue;
-    let best:
-      | ((typeof candidates)[number] & { distance: number; cost: number })
-      | undefined;
-    for (const candidate of candidates) {
-      if (used.has(candidate.sourceIndex)) continue;
+    if (!wrist || (wrist.visibility ?? 1) < 0.45) return [];
+    return candidates.flatMap((candidate) => {
       const handWrist = candidate.hand.landmarks[0];
       const distance = Math.hypot(handWrist.x - wrist.x, handWrist.y - wrist.y);
+      if (distance > Math.max(0.12, candidate.imageDiagonal * 1.5)) return [];
       // Distance is authoritative; handedness resolves crossings/near ties.
       const cost = distance + (candidate.label === side ? 0 : 0.08);
-      if (!best || cost < best.cost) best = { ...candidate, distance, cost };
+      return [{ ...candidate, distance, cost }];
+    });
+  });
+
+  // Solve both wrists together. A greedy left-first match can consume the only
+  // valid candidate for the right wrist when hands overlap or cross.
+  let assignment: Array<(typeof options)[number][number] | undefined> = [];
+  let bestMatched = -1;
+  let bestCost = Number.POSITIVE_INFINITY;
+  for (const left of [undefined, ...options[0]]) {
+    for (const right of [undefined, ...options[1]]) {
+      if (left && right && left.sourceIndex === right.sourceIndex) continue;
+      const matched = Number(Boolean(left)) + Number(Boolean(right));
+      const cost = (left?.cost ?? 0) + (right?.cost ?? 0);
+      if (
+        matched > bestMatched ||
+        (matched === bestMatched && cost < bestCost)
+      ) {
+        assignment = [left, right];
+        bestMatched = matched;
+        bestCost = cost;
+      }
     }
-    if (!best || best.distance > Math.max(0.12, best.imageDiagonal * 1.5))
-      continue;
-    used.add(best.sourceIndex);
+  }
+
+  const output: HandsGuidance = {};
+  for (let index = 0; index < sides.length; index++) {
+    const side = sides[index][0];
+    const best = assignment[index];
+    if (!best) continue;
     const enrich = (p: NormalizedLandmark): HandLandmark => ({
       ...p,
-      visibility: best!.confidence,
-      confidence: best!.confidence,
+      visibility: best.confidence,
+      confidence: best.confidence,
     });
     output[side] = {
       landmarks: best.hand.landmarks.map(enrich),

@@ -556,6 +556,20 @@ function handDirection(
   return direction.lengthSq() > EPSILON ? direction.normalize() : undefined;
 }
 
+function usableHand(hand: HandPose | undefined): hand is HandPose {
+  return Boolean(
+    hand &&
+      hand.confidence >= MIN_HAND_CONFIDENCE &&
+      hand.worldLandmarks.length === 21 &&
+      hand.worldLandmarks.every(
+        (point) =>
+          Number.isFinite(point.x + point.y + point.z) &&
+          (point.visibility ?? hand.confidence) >= MIN_HAND_CONFIDENCE &&
+          point.confidence >= MIN_HAND_CONFIDENCE,
+      ),
+  );
+}
+
 function applyWorldDirection(
   bone: THREE.Object3D,
   saved: RestBone,
@@ -690,8 +704,7 @@ export function retargetSkeleton(
       }
     } else if (
       (rule.id === "leftHand" || rule.id === "rightHand") &&
-      (pose.hands?.[rule.id === "leftHand" ? "left" : "right"]?.confidence ??
-        0) >= MIN_HAND_CONFIDENCE
+      usableHand(pose.hands?.[rule.id === "leftHand" ? "left" : "right"])
     ) {
       const hand = pose.hands![rule.id === "leftHand" ? "left" : "right"]!;
       const target = handDirection(hand, 0, 9, depthScale);
@@ -700,6 +713,17 @@ export function retargetSkeleton(
           .setFromUnitVectors(saved.worldDirection, target)
           .multiply(saved.worldQuaternion)
           .normalize();
+      else if (usable([...rule.from, ...rule.to], pose)) {
+        const fallback = poseDirection(rule.from, rule.to, pose, depthScale);
+        if (
+          fallback.lengthSq() > EPSILON &&
+          saved.worldDirection.lengthSq() > EPSILON
+        )
+          desiredWorld = new THREE.Quaternion()
+            .setFromUnitVectors(saved.worldDirection, fallback)
+            .multiply(saved.worldQuaternion)
+            .normalize();
+      }
     } else if (usable([...rule.from, ...rule.to], pose)) {
       const target = poseDirection(rule.from, rule.to, pose, depthScale);
       if (
@@ -739,7 +763,7 @@ export function retargetSkeleton(
       continue;
     }
     const hand = pose.hands?.[rule.side];
-    if (!hand || hand.confidence < MIN_HAND_CONFIDENCE) {
+    if (!usableHand(hand)) {
       report.skippedBones.push(rule.bone);
       continue;
     }

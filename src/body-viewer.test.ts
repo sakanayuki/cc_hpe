@@ -310,6 +310,16 @@ describe("dedicated hand retargeting", () => {
     );
     expect(matched.left?.landmarks[0].x).toBeCloseTo(0.2);
     expect(matched.right?.landmarks[0].x).toBeCloseTo(0.8);
+
+    posePoints[15].x = 0.4;
+    posePoints[16].x = 0.6;
+    const overlapping = associateHands(
+      [raw(0.49, "Left"), raw(0.29, "Right")],
+      posePoints,
+      false,
+    );
+    expect(overlapping.left?.landmarks[0].x).toBeCloseTo(0.29);
+    expect(overlapping.right?.landmarks[0].x).toBeCloseTo(0.49);
   });
 
   it("keeps fingers at rest and falls back to pose palm rotation at low confidence", () => {
