@@ -1,5 +1,9 @@
 import "./style.css";
-import { imageToCloud, type GaussianCloud } from "./gaussian";
+import {
+  formatEstimatedPlySize,
+  imageToCloud,
+  type GaussianCloud,
+} from "./gaussian";
 import { download, exportPly, exportSplat, exportSpz } from "./exporters";
 import { SplatViewer, type RenderMode } from "./viewer";
 import { detectSinglePerson } from "./pose";
@@ -457,6 +461,8 @@ generate.addEventListener("click", async () => {
       },
       pose,
     );
+    if (!Number.isInteger(cloud.count) || cloud.count <= 0)
+      throw new Error("生成されたGaussian cloudの点数が不正です。");
     viewer.setCloud(cloud);
     stepOneActive = false;
     updateReference();
@@ -469,8 +475,7 @@ generate.addEventListener("click", async () => {
     byId("exports").classList.remove("hidden");
     byId("stats").textContent = `${cloud.count.toLocaleString("ja-JP")} splats`;
     const seconds = (performance.now() - startedAt) / 1000;
-    const plyMiB = (cloud.count * 68) / 1024 / 1024;
-    status.textContent = `3DGS化完了 · ${seconds.toFixed(1)}秒 · PLY推定${plyMiB.toFixed(1)} MiB`;
+    status.textContent = `3DGS化完了 · ${seconds.toFixed(1)}秒 · ${cloud.count.toLocaleString("ja-JP")}点 · PLY推定${formatEstimatedPlySize(cloud.count)}`;
   } catch (error) {
     status.textContent =
       error instanceof Error ? error.message : "推定に失敗しました";
