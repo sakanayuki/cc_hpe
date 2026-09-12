@@ -3,6 +3,7 @@ import * as THREE from "three";
 import {
   applyBodyProportions,
   applyJointCorrection,
+  alignRootToImagePelvis,
   captureRestPose,
   fitFrontProjection,
   landmarkToModel,
@@ -10,6 +11,7 @@ import {
   retargetSkeleton,
 } from "./body-viewer";
 import type { PoseGuidance } from "./pose";
+import { associateHands, type HandPose } from "./pose";
 
 const points = Array.from({ length: 33 }, () => ({
   x: 0,
@@ -72,7 +74,7 @@ describe("GLB pose retargeting", () => {
     add(leftShin, "mixamorig:LeftFoot", new THREE.Vector3(0, -1, 0));
     root.updateWorldMatrix(true, true);
     const rest = captureRestPose(root);
-    const p = structuredClone(pose);
+    const p: PoseGuidance = structuredClone(pose);
     p.worldLandmarks[11] = { x: -1, y: -1, z: 0, visibility: 1 };
     p.worldLandmarks[12] = { x: 1, y: -1, z: 0, visibility: 1 };
     p.worldLandmarks[23] = { x: -0.5, y: 0, z: 0, visibility: 1 };
@@ -122,9 +124,286 @@ describe("GLB pose retargeting", () => {
     expect(Math.abs(hips.quaternion.dot(onceQ))).toBeCloseTo(1);
     expect(hips.position.distanceTo(onceP)).toBeCloseTo(0);
   });
+
+  it("distributes simultaneous hip yaw, torso lean, and shoulder roll through the real spine chain", () => {
+    const hips = new THREE.Bone();
+    hips.name = "mixamorig:Hips";
+    const add = (parent: THREE.Bone, name: string) => {
+      const bone = new THREE.Bone();
+      bone.name = name;
+      bone.position.y = 1;
+      parent.add(bone);
+      return bone;
+    };
+    const spine = add(hips, "mixamorig:Spine");
+    const spine1 = add(spine, "mixamorig:Spine1");
+    const spine2 = add(spine1, "mixamorig:Spine2");
+    add(spine2, "mixamorig:Neck");
+    hips.updateWorldMatrix(true, true);
+    const rest = captureRestPose(hips);
+    expect(rest.has("mixamorig:Spine1")).toBe(true);
+
+    const p = structuredClone(pose);
+    const put = (index: number, value: THREE.Vector3) => {
+      p.worldLandmarks[index] = {
+        x: value.x,
+        y: -value.y,
+        z: -value.z,
+        visibility: 1,
+      };
+    };
+    const hipCenter = new THREE.Vector3(0, 0, 0);
+    const shoulderCenter = new THREE.Vector3(0.45, 2, 0.35);
+    const hipRight = new THREE.Vector3(0.8, 0, -0.6);
+    const shoulderRight = new THREE.Vector3(0.75, 0.45, -0.3).normalize();
+    const headCenter = shoulderCenter
+      .clone()
+      .add(new THREE.Vector3(0.2, 1, 0.4));
+    put(23, hipCenter.clone().addScaledVector(hipRight, -0.5));
+    put(24, hipCenter.clone().addScaledVector(hipRight, 0.5));
+    put(11, shoulderCenter.clone().addScaledVector(shoulderRight, -0.7));
+    put(12, shoulderCenter.clone().addScaledVector(shoulderRight, 0.7));
+    put(7, headCenter.clone().addScaledVector(shoulderRight, -0.15));
+    put(8, headCenter.clone().addScaledVector(shoulderRight, 0.15));
+
+    const frame = (upValue: THREE.Vector3, rightValue: THREE.Vector3) => {
+      const up = upValue.clone().normalize();
+      const right = rightValue
+        .clone()
+        .addScaledVector(up, -rightValue.dot(up))
+        .normalize();
+      const front = right.clone().cross(up).normalize();
+      return new THREE.Quaternion().setFromRotationMatrix(
+        new THREE.Matrix4().makeBasis(right, front.clone().cross(right), front),
+      );
+    };
+    const rootFrame = frame(
+      shoulderCenter.clone().sub(hipCenter),
+      hipRight.clone().normalize().add(shoulderRight),
+    );
+    const chestFrame = frame(
+      headCenter.clone().sub(shoulderCenter),
+      shoulderRight,
+    );
+    const expectedWorld = [0, 1 / 3, 2 / 3, 1].map((weight) =>
+      rootFrame.clone().slerp(chestFrame, weight).normalize(),
+    );
+
+    retargetSkeleton(hips, p, rest);
+    const bones = [hips, spine, spine1, spine2];
+    for (let i = 0; i < bones.length; i++) {
+      const actualWorld = bones[i].getWorldQuaternion(new THREE.Quaternion());
+      const actualDirection = new THREE.Vector3(0, 1, 0).applyQuaternion(
+        actualWorld,
+      );
+      const expectedDirection = new THREE.Vector3(0, 1, 0).applyQuaternion(
+        expectedWorld[i],
+      );
+      expect(actualDirection.dot(expectedDirection)).toBeCloseTo(1, 5);
+
+      const parentWorld =
+        i === 0 ? new THREE.Quaternion() : expectedWorld[i - 1];
+      const expectedLocal = parentWorld
+        .clone()
+        .invert()
+        .multiply(expectedWorld[i]);
+      expect(Math.abs(bones[i].quaternion.dot(expectedLocal))).toBeCloseTo(
+        1,
+        5,
+      );
+    }
+  });
+});
+
+describe("dedicated hand retargeting", () => {
+  const makeHand = (side: "Left" | "Right") => {
+    const forearm = new THREE.Bone();
+    forearm.name = `mixamorig:${side}ForeArm`;
+    const hand = new THREE.Bone();
+    hand.name = `mixamorig:${side}Hand`;
+    hand.position.x = 1;
+    forearm.add(hand);
+    for (const finger of ["Thumb", "Index", "Middle", "Ring", "Pinky"]) {
+      let parent = hand;
+      for (let i = 1; i <= 4; i++) {
+        const bone = new THREE.Bone();
+        bone.name = `mixamorig:${side}Hand${finger}${i}`;
+        bone.position.x = 0.2;
+        parent.add(bone);
+        parent = bone;
+      }
+    }
+    forearm.updateWorldMatrix(true, true);
+    return { root: forearm, hand };
+  };
+  const detectedHand = (
+    side: "left" | "right",
+    confidence = 0.95,
+  ): HandPose => {
+    const landmarks = Array.from({ length: 21 }, (_, i) => ({
+      x: i * 0.01,
+      y: 0,
+      z: 0,
+      visibility: confidence,
+      confidence,
+    }));
+    landmarks[0] = { ...landmarks[0], x: 0, y: 0 };
+    landmarks[9] = { ...landmarks[9], x: 0, y: -1 };
+    landmarks[5] = { ...landmarks[5], x: 0, y: 0 };
+    landmarks[6] = { ...landmarks[6], x: 1, y: 0 };
+    landmarks[7] = { ...landmarks[7], x: 1, y: -1 };
+    landmarks[8] = { ...landmarks[8], x: 2, y: -1 };
+    return {
+      landmarks,
+      worldLandmarks: structuredClone(landmarks),
+      handedness: side,
+      confidence,
+    };
+  };
+
+  it("uses dedicated palm and finger directions", () => {
+    const { root, hand } = makeHand("Left");
+    const rest = captureRestPose(root);
+    const p: PoseGuidance = structuredClone(pose);
+    p.hands = { left: detectedHand("left") };
+    retargetSkeleton(root, p, rest);
+    const palmDirection = hand.children[0]
+      .getWorldPosition(new THREE.Vector3())
+      .sub(hand.getWorldPosition(new THREE.Vector3()))
+      .normalize();
+    expect(palmDirection.y).toBeGreaterThan(0.99);
+    const index1 = root.getObjectByName("mixamorig:LeftHandIndex1")!;
+    const index2 = root.getObjectByName("mixamorig:LeftHandIndex2")!;
+    expect(
+      index2
+        .getWorldPosition(new THREE.Vector3())
+        .sub(index1.getWorldPosition(new THREE.Vector3()))
+        .normalize().x,
+    ).toBeGreaterThan(0.99);
+  });
+
+  it("associates geometrically nearest left and right wrists despite result order", () => {
+    const posePoints = structuredClone(points);
+    posePoints[15] = { x: 0.2, y: 0.5, z: 0, visibility: 1 };
+    posePoints[16] = { x: 0.8, y: 0.5, z: 0, visibility: 1 };
+    const raw = (x: number, label: "Left" | "Right") => ({
+      landmarks: Array.from({ length: 21 }, (_, i) => ({
+        x: x + i * 0.003,
+        y: 0.5,
+        z: 0,
+        visibility: 1,
+      })),
+      worldLandmarks: Array.from({ length: 21 }, (_, i) => ({
+        x: i * 0.01,
+        y: 0,
+        z: 0,
+        visibility: 1,
+      })),
+      handedness: [
+        { score: 0.98, categoryName: label, index: 0, displayName: label },
+      ],
+    });
+    const matched = associateHands(
+      [raw(0.8, "Left"), raw(0.2, "Right")],
+      posePoints,
+      false,
+    );
+    expect(matched.left?.landmarks[0].x).toBeCloseTo(0.2);
+    expect(matched.right?.landmarks[0].x).toBeCloseTo(0.8);
+
+    posePoints[15].x = 0.4;
+    posePoints[16].x = 0.6;
+    const overlapping = associateHands(
+      [raw(0.49, "Left"), raw(0.29, "Right")],
+      posePoints,
+      false,
+    );
+    expect(overlapping.left?.landmarks[0].x).toBeCloseTo(0.29);
+    expect(overlapping.right?.landmarks[0].x).toBeCloseTo(0.49);
+  });
+
+  it("keeps fingers at rest and falls back to pose palm rotation at low confidence", () => {
+    const { root, hand } = makeHand("Right");
+    const rest = captureRestPose(root);
+    const p: PoseGuidance = structuredClone(pose);
+    p.worldLandmarks[16] = { x: 0, y: 0, z: 0, visibility: 1 };
+    p.worldLandmarks[18] = p.worldLandmarks[20] = {
+      x: 0,
+      y: -1,
+      z: 0,
+      visibility: 1,
+    };
+    p.hands = { right: detectedHand("right", 0.4) };
+    retargetSkeleton(root, p, rest);
+    expect(
+      Math.abs(hand.quaternion.dot(rest.get(hand.name)!.localQuaternion)),
+    ).toBeLessThan(0.99);
+    const finger = root.getObjectByName("mixamorig:RightHandIndex1")!;
+    expect(
+      Math.abs(finger.quaternion.dot(rest.get(finger.name)!.localQuaternion)),
+    ).toBeCloseTo(1);
+  });
 });
 
 describe("front image/GLB projection alignment", () => {
+  it.each([
+    ["left/up", 0.2, 0.25],
+    ["right/down", 0.8, 0.75],
+  ])(
+    "projects the hips onto an offset pelvis anchor (%s) with transformed parents and a portrait image",
+    (_label, x, y) => {
+      const viewport = { width: 1000, height: 600 };
+      const imageSize = { width: 600, height: 1200 };
+      const camera = new THREE.PerspectiveCamera(
+        36,
+        viewport.width / viewport.height,
+        0.01,
+        100,
+      );
+      camera.position.set(0.4, -0.2, 6);
+      camera.lookAt(0, 0, 0);
+      camera.updateProjectionMatrix();
+
+      const parent = new THREE.Group();
+      parent.position.set(0.3, -0.1, 0.2);
+      parent.rotation.set(0.1, -0.2, 0.35);
+      parent.scale.set(1.3, 0.8, 1.1);
+      const root = new THREE.Group();
+      root.scale.set(1.7, 0.65, 1.25);
+      root.position.set(-0.25, 0.35, -0.1);
+      const hips = new THREE.Bone();
+      hips.name = "mixamorig:Hips";
+      hips.position.set(0.15, 0.4, 0.05);
+      parent.add(root);
+      root.add(hips);
+
+      const landmarks = structuredClone(points);
+      landmarks[23] = { x: x - 0.04, y: y + 0.02, z: 0, visibility: 1 };
+      landmarks[24] = { x: x + 0.04, y: y - 0.02, z: 0, visibility: 1 };
+      expect(
+        alignRootToImagePelvis(
+          root,
+          hips,
+          landmarks,
+          imageSize,
+          viewport,
+          camera,
+        ),
+      ).toBe(true);
+
+      const projected = hips
+        .getWorldPosition(new THREE.Vector3())
+        .project(camera);
+      const projectedPixel = {
+        x: ((projected.x + 1) / 2) * viewport.width,
+        y: ((1 - projected.y) / 2) * viewport.height,
+      };
+      // 600x1200 contained in 1000x600 is 300px wide with a 350px x offset.
+      expect(projectedPixel.x).toBeCloseTo(350 + x * 300, 5);
+      expect(projectedPixel.y).toBeCloseTo(y * 600, 5);
+    },
+  );
+
   it("minimizes major-joint reprojection error relative to image diagonal", () => {
     // shoulders, hips and feet in model space, transformed into a 9:16 photo.
     const model = [

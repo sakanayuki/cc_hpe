@@ -8,6 +8,7 @@ import { getContainRect, mapLandmarkToContain } from "./pose-overlay";
 import {
   BodyViewer,
   EDITABLE_JOINTS,
+  isCompleteBodyRetarget,
   JOINT_LABELS,
   type JointId,
 } from "./body-viewer";
@@ -45,7 +46,7 @@ app.innerHTML = `
         <p id="status" class="status" role="status">写真を選択してください</p>
       </aside>
       <section class="viewer-card" aria-label="3Dビューアー">
-        <div class="toolbar"><div><b id="stageLabel">STEP 1 · 素体GLBプレビュー</b><div class="segmented" id="views"><button data-view="front">正面</button><button data-view="side">側面</button><button data-view="back">背面</button><button data-view="top">上面</button></div><div class="segmented hidden" id="modes" role="group" aria-label="表示情報"><button class="active" data-mode="color">カラー</button><button data-mode="depth">深度</button><button data-mode="opacity">不透明度</button><button data-mode="confidence">信頼度</button><button data-mode="source">生成層</button></div><div id="filters" class="viewer-filters hidden"><label>信頼度 <input id="minConfidence" type="range" min="0" max="100" value="0"/><output id="minConfidenceOut">0%</output></label><select id="layerFilter" aria-label="生成層フィルター"><option value="-1">全生成層</option><option value="0">前面のみ</option><option value="1">中心のみ</option><option value="2">推定背面のみ</option></select></div></div><button id="reset" class="icon-button" title="視点をリセット">↻</button></div>
+        <div class="toolbar"><div><b id="stageLabel">STEP 1 · 素体GLBプレビュー</b><div class="segmented" id="views"><button data-view="front">正面</button><button data-view="side">側面</button><button data-view="back">背面</button><button data-view="top">上面</button></div><div class="segmented hidden" id="modes" role="group" aria-label="表示情報"><button class="active" data-mode="color">カラー</button><button data-mode="depth">深度</button><button data-mode="opacity">不透明度</button><button data-mode="confidence">信頼度</button><button data-mode="source">生成元</button></div><div id="filters" class="viewer-filters hidden"><label>信頼度 <input id="minConfidence" type="range" min="0" max="100" value="0"/><output id="minConfidenceOut">0%</output></label><select id="layerFilter" aria-label="生成元フィルター"><option value="-1">全生成元</option><option value="0">観測面のみ</option><option value="1">推定背面のみ</option><option value="2">補間領域のみ</option></select></div></div><button id="reset" class="icon-button" title="視点をリセット">↻</button></div>
         <div id="viewer" class="viewer"><img id="referenceImage" class="reference-image hidden" alt="比較用の元画像"/><div id="empty" class="empty"><div class="orb"><span></span></div><strong>姿勢付き素体プレビュー</strong><p>写真を選びSTEP 1を実行すると、<br>推定ポーズを適用したGLB素体を表示します</p></div><div id="angle" class="angle hidden">正面以外では画像比較できません · <b>0°</b></div></div>
         <footer class="viewer-footer"><span><kbd>ドラッグ</kbd> 回転</span><span><kbd>ホイール</kbd> ズーム</span><span id="fps">-- FPS</span><span id="stats">0 splats</span></footer>
       </section>
@@ -397,11 +398,14 @@ estimate.addEventListener("click", async () => {
     ).length;
     byId("poseQuality").textContent =
       `33関節を推定 · 高信頼 ${visible}/33 · 紫の骨格を写真上に表示`;
-    generate.disabled = application.appliedBones === 0;
+    const completeRetarget = isCompleteBodyRetarget(application);
+    generate.disabled = !completeRetarget;
     const result = `姿勢推定成功 · GLB適用 ${application.appliedBones}ボーン · 欠落 ${application.missingBones.length}ボーン`;
-    status.textContent = application.missingBones.length
-      ? `${result}（${application.missingBones.join("、")}）`
-      : `${result} · 素体を回転して姿勢を確認・補正してください`;
+    status.textContent = !completeRetarget
+      ? `${result} · 必須ボーンへの姿勢適用が未完了です`
+      : application.missingBones.length
+        ? `${result}（${application.missingBones.join("、")}）`
+        : `${result} · 素体を回転して姿勢を確認・補正してください`;
   } catch (error) {
     pose = undefined;
     status.textContent =
@@ -418,9 +422,6 @@ generate.addEventListener("click", async () => {
   status.textContent = "確認した骨格と人物領域から3DGS化しています…";
   await new Promise(requestAnimationFrame);
   try {
-    pose.rigDepth = bodyViewer.captureDepth();
-    pose.rigDepthWidth = 512;
-    pose.rigDepthHeight = 512;
     const max = 1400,
       ratio = Math.min(
         1,
@@ -429,6 +430,7 @@ generate.addEventListener("click", async () => {
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(sourceImage.naturalWidth * ratio);
     canvas.height = Math.round(sourceImage.naturalHeight * ratio);
+    pose.rigSurface = bodyViewer.captureDepth(canvas.width, canvas.height);
     const context = canvas.getContext("2d", { willReadFrequently: true });
     if (!context) throw new Error("画像処理を開始できませんでした。");
     context.drawImage(sourceImage, 0, 0, canvas.width, canvas.height);

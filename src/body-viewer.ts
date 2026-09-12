@@ -1,7 +1,13 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { PoseGuidance } from "./pose";
+import {
+  MIN_HAND_CONFIDENCE,
+  type HandPose,
+  type HandSide,
+  type PoseGuidance,
+  type RigSurfaceBuffer,
+} from "./pose";
 import {
   getContainRect,
   mapLandmarkToContain,
@@ -12,6 +18,7 @@ import {
 export type JointId =
   | "hips"
   | "spine"
+  | "spine1"
   | "chest"
   | "neck"
   | "head"
@@ -41,6 +48,14 @@ export type RetargetReport = {
   missingBones: string[];
   skippedBones: string[];
 };
+
+/** GLTFLoader sanitizes ':' from node names; restore the authored Mixamo names. */
+export function restoreMixamoBoneNames(model: THREE.Object3D) {
+  model.traverse((node) => {
+    if ((node as THREE.Bone).isBone && /^mixamorig(?!:)/.test(node.name))
+      node.name = node.name.replace(/^mixamorig/, "mixamorig:");
+  });
+}
 export type RestBone = {
   localPosition: THREE.Vector3;
   localQuaternion: THREE.Quaternion;
@@ -159,6 +174,7 @@ export function applyJointCorrection(
 export const JOINT_LABELS: Record<JointId, string> = {
   hips: "腰",
   spine: "背骨",
+  spine1: "背骨（中央）",
   chest: "胸",
   neck: "首",
   head: "頭",
@@ -193,6 +209,13 @@ export const RULES: readonly Rule[] = [
     from: [23, 24],
     to: [11, 12],
     child: "mixamorig:Spine1",
+  },
+  {
+    id: "spine1",
+    bone: "mixamorig:Spine1",
+    from: [23, 24],
+    to: [11, 12],
+    child: "mixamorig:Spine2",
   },
   {
     id: "chest",
@@ -284,6 +307,54 @@ export const RULES: readonly Rule[] = [
   },
   { id: "rightFoot", bone: "mixamorig:RightFoot", from: [28], to: [32] },
 ];
+
+/** STEP 1 requires every body rule to have been applied successfully. */
+export function isCompleteBodyRetarget(report: RetargetReport) {
+  return (
+    report.appliedBones >= RULES.length &&
+    RULES.every(
+      ({ bone }) =>
+        !report.missingBones.includes(bone) &&
+        !report.skippedBones.includes(bone),
+    )
+  );
+}
+
+type FingerRule = {
+  side: HandSide;
+  bone: string;
+  from: number;
+  to: number;
+  /** Share the last measured distal bend with an otherwise unobserved tip bone. */
+  distalBlend?: number;
+};
+
+const FINGER_LANDMARKS = {
+  Thumb: [1, 2, 3, 4],
+  Index: [5, 6, 7, 8],
+  Middle: [9, 10, 11, 12],
+  Ring: [13, 14, 15, 16],
+  Pinky: [17, 18, 19, 20],
+} as const;
+
+/** Mixamo's four phalange bones mapped onto MediaPipe's observed segments. */
+export const HAND_BONE_RULES: readonly FingerRule[] = (
+  ["Left", "Right"] as const
+).flatMap((mixamoSide) =>
+  Object.entries(FINGER_LANDMARKS).flatMap(([finger, points]) => {
+    const side = mixamoSide.toLowerCase() as HandSide;
+    return [1, 2, 3, 4].map(
+      (number): FingerRule => ({
+        side,
+        bone: `mixamorig:${mixamoSide}Hand${finger}${number}`,
+        from: points[Math.min(number - 1, 2)],
+        to: points[Math.min(number, 3)],
+        // Bone 3 and the extra terminal bone share the final observed flexion.
+        distalBlend: number === 3 ? 0.7 : number === 4 ? 1 : undefined,
+      }),
+    );
+  }),
+);
 export const EDITABLE_JOINTS = RULES.map((r) => r.id);
 
 const MIN_VISIBILITY = 0.45;
@@ -350,6 +421,56 @@ export function fitFrontProjection(
   };
 }
 
+/**
+ * Moves the GLB root so that its hips project onto the image pelvis anchor.
+ *
+ * The translation is solved at the hips' existing clip-space depth.  Applying
+ * it to the model root (rather than the hips bone) preserves the complete skin
+ * hierarchy.  Converting both the old and desired root world positions through
+ * the inverse parent matrix also makes this correct below rotated/scaled
+ * parents.
+ */
+export function alignRootToImagePelvis(
+  modelRoot: THREE.Object3D,
+  hips: THREE.Object3D,
+  landmarks: PoseGuidance["landmarks"],
+  imageSize: Size,
+  viewport: Size,
+  camera: THREE.Camera,
+) {
+  if (!landmarks[23] || !landmarks[24] || !viewport.width || !viewport.height)
+    return false;
+  const pelvis = {
+    x: (landmarks[23].x + landmarks[24].x) / 2,
+    y: (landmarks[23].y + landmarks[24].y) / 2,
+  };
+  const pixel = mapLandmarkToContain(
+    pelvis,
+    getContainRect(imageSize, viewport),
+  );
+
+  modelRoot.parent?.updateWorldMatrix(true, false);
+  modelRoot.updateWorldMatrix(true, true);
+  camera.updateWorldMatrix(true, false);
+  const hipsWorld = hips.getWorldPosition(new THREE.Vector3());
+  const clip = hipsWorld.clone().project(camera);
+  const desiredHipsWorld = new THREE.Vector3(
+    (pixel.x / viewport.width) * 2 - 1,
+    1 - (pixel.y / viewport.height) * 2,
+    clip.z,
+  ).unproject(camera);
+  const desiredRootWorld = modelRoot
+    .getWorldPosition(new THREE.Vector3())
+    .add(desiredHipsWorld.sub(hipsWorld));
+  if (modelRoot.parent)
+    desiredRootWorld.applyMatrix4(
+      modelRoot.parent.matrixWorld.clone().invert(),
+    );
+  modelRoot.position.copy(desiredRootWorld);
+  modelRoot.updateWorldMatrix(true, true);
+  return true;
+}
+
 /** The only MediaPipe -> Three/GLB coordinate-system boundary. */
 export function landmarkToModel(
   landmark: { x: number; y: number; z: number },
@@ -411,25 +532,131 @@ export function captureRestPose(model: THREE.Object3D) {
       worldDirection: end.clone().sub(start).normalize(),
     });
   }
+  for (const rule of HAND_BONE_RULES) {
+    const bone = model.getObjectByName(rule.bone);
+    if (!bone) continue;
+    const child = bone.children.find((node) => (node as THREE.Bone).isBone);
+    const start = bone.getWorldPosition(new THREE.Vector3());
+    let end = child?.getWorldPosition(new THREE.Vector3()) ?? start.clone();
+    if (!child) {
+      const parentDirection =
+        bone.parent && result.get(bone.parent.name)?.worldDirection;
+      if (parentDirection) end = start.clone().add(parentDirection);
+    }
+    result.set(rule.bone, {
+      localPosition: bone.position.clone(),
+      localQuaternion: bone.quaternion.clone(),
+      worldQuaternion: bone.getWorldQuaternion(new THREE.Quaternion()),
+      start,
+      end,
+      worldDirection: end.clone().sub(start).normalize(),
+    });
+  }
   return result;
 }
 
-function torsoFrame(pose: PoseGuidance, depthScale: number) {
+function handDirection(
+  hand: HandPose,
+  from: number,
+  to: number,
+  depthScale: number,
+) {
+  const a = hand.worldLandmarks[from];
+  const b = hand.worldLandmarks[to];
+  if (
+    !a ||
+    !b ||
+    (a.visibility ?? 0) < MIN_HAND_CONFIDENCE ||
+    (b.visibility ?? 0) < MIN_HAND_CONFIDENCE
+  )
+    return undefined;
+  const direction = landmarkToModel(b, depthScale).sub(
+    landmarkToModel(a, depthScale),
+  );
+  return direction.lengthSq() > EPSILON ? direction.normalize() : undefined;
+}
+
+function usableHand(hand: HandPose | undefined): hand is HandPose {
+  return Boolean(
+    hand &&
+      hand.confidence >= MIN_HAND_CONFIDENCE &&
+      hand.worldLandmarks.length === 21 &&
+      hand.worldLandmarks.every(
+        (point) =>
+          Number.isFinite(point.x + point.y + point.z) &&
+          (point.visibility ?? hand.confidence) >= MIN_HAND_CONFIDENCE &&
+          point.confidence >= MIN_HAND_CONFIDENCE,
+      ),
+  );
+}
+
+function applyWorldDirection(
+  bone: THREE.Object3D,
+  saved: RestBone,
+  target: THREE.Vector3,
+) {
+  const desiredWorld = new THREE.Quaternion()
+    .setFromUnitVectors(saved.worldDirection, target)
+    .multiply(saved.worldQuaternion)
+    .normalize();
+  const parentWorld =
+    bone.parent?.getWorldQuaternion(new THREE.Quaternion()) ??
+    new THREE.Quaternion();
+  bone.quaternion.copy(parentWorld.invert().multiply(desiredWorld)).normalize();
+}
+
+function frameFromUpAndRight(
+  upValue: THREE.Vector3,
+  rightValue: THREE.Vector3,
+) {
+  const up = upValue.clone().normalize();
+  const right = rightValue
+    .clone()
+    .addScaledVector(up, -rightValue.dot(up))
+    .normalize();
+  if (up.lengthSq() <= EPSILON || right.lengthSq() <= EPSILON) return undefined;
+  const front = right.clone().cross(up).normalize();
+  if (front.lengthSq() <= EPSILON) return undefined;
+  return new THREE.Quaternion()
+    .setFromRotationMatrix(
+      new THREE.Matrix4().makeBasis(right, front.clone().cross(right), front),
+    )
+    .normalize();
+}
+
+function torsoFrames(pose: PoseGuidance, depthScale: number) {
   if (!usable([11, 12, 23, 24], pose)) return undefined;
   const hips = average([23, 24], pose, depthScale);
   const shoulders = average([11, 12], pose, depthScale);
-  const right = average([12], pose, depthScale).sub(
+  const hipRight = average([24], pose, depthScale).sub(
+    average([23], pose, depthScale),
+  );
+  const shoulderRight = average([12], pose, depthScale).sub(
     average([11], pose, depthScale),
   );
-  const up = shoulders.sub(hips);
-  if (right.lengthSq() <= EPSILON || up.lengthSq() <= EPSILON) return undefined;
-  right.normalize();
-  const front = right.clone().cross(up).normalize();
-  if (front.lengthSq() <= EPSILON) return undefined;
-  const correctedUp = front.clone().cross(right).normalize();
-  return new THREE.Quaternion().setFromRotationMatrix(
-    new THREE.Matrix4().makeBasis(right, correctedUp, front),
+  const torsoUp = shoulders.clone().sub(hips);
+  // Both lateral observations contribute to the pelvis frame: using only the
+  // shoulders makes a hip yaw look like spine twist.
+  const root = frameFromUpAndRight(
+    torsoUp,
+    hipRight.clone().normalize().add(shoulderRight.clone().normalize()),
   );
+  if (!root) return undefined;
+
+  let chestUp = torsoUp;
+  if (usable([7, 8], pose))
+    chestUp = average([7, 8], pose, depthScale).sub(shoulders);
+  else if (usable([0], pose))
+    chestUp = average([0], pose, depthScale).sub(shoulders);
+  const chest = frameFromUpAndRight(chestUp, shoulderRight) ?? root.clone();
+  return { root, chest };
+}
+
+function restFrame(saved: RestBone) {
+  const restRight = new THREE.Vector3(1, 0, 0).applyQuaternion(
+    saved.worldQuaternion,
+  );
+  return frameFromUpAndRight(saved.worldDirection, restRight);
 }
 
 /** Retargets from immutable rest data and is intentionally usable in unit tests. */
@@ -444,11 +671,24 @@ export function retargetSkeleton(
     missingBones: [],
     skippedBones: [],
   };
-  const bodyFrame = torsoFrame(pose, depthScale);
-  const torsoIds = new Set<JointId>(["hips", "spine", "chest"]);
+  const bodyFrames = torsoFrames(pose, depthScale);
+  const torsoWeights: Partial<Record<JointId, number>> = {
+    hips: 0,
+    spine: 1 / 3,
+    spine1: 2 / 3,
+    chest: 1,
+  };
 
   // Always reset the whole chain first: repeated calls must never accumulate.
   for (const rule of RULES) {
+    const bone = model.getObjectByName(rule.bone);
+    const saved = rest.get(rule.bone);
+    if (bone && saved) {
+      bone.quaternion.copy(saved.localQuaternion);
+      bone.position.copy(saved.localPosition);
+    }
+  }
+  for (const rule of HAND_BONE_RULES) {
     const bone = model.getObjectByName(rule.bone);
     const saved = rest.get(rule.bone);
     if (bone && saved) {
@@ -466,21 +706,44 @@ export function retargetSkeleton(
       continue;
     }
     let desiredWorld: THREE.Quaternion | undefined;
-    if (torsoIds.has(rule.id) && bodyFrame) {
-      // Rest GLB axes are inferred once from its front/up convention.  The
-      // target body frame carries root yaw/roll, torso lean and shoulder tilt.
-      const restUp = saved.worldDirection;
-      const restRight = new THREE.Vector3(1, 0, 0).applyQuaternion(
-        saved.worldQuaternion,
-      );
-      const restFront = restRight.clone().cross(restUp).normalize();
-      const restFrame = new THREE.Quaternion().setFromRotationMatrix(
-        new THREE.Matrix4().makeBasis(restRight, restUp, restFront),
-      );
-      desiredWorld = bodyFrame
+    const torsoWeight = torsoWeights[rule.id];
+    if (torsoWeight !== undefined && bodyFrames) {
+      // Interpolated *world* frames distribute bend/twist along the chain;
+      // applying one torso quaternion to every local bone would compound it.
+      const targetFrame = bodyFrames.root
         .clone()
-        .multiply(restFrame.invert())
-        .multiply(saved.worldQuaternion);
+        .slerp(bodyFrames.chest, torsoWeight)
+        .normalize();
+      const sourceFrame = restFrame(saved);
+      if (sourceFrame) {
+        const restCorrection = sourceFrame
+          .clone()
+          .invert()
+          .multiply(saved.worldQuaternion);
+        desiredWorld = targetFrame.multiply(restCorrection).normalize();
+      }
+    } else if (
+      (rule.id === "leftHand" || rule.id === "rightHand") &&
+      usableHand(pose.hands?.[rule.id === "leftHand" ? "left" : "right"])
+    ) {
+      const hand = pose.hands![rule.id === "leftHand" ? "left" : "right"]!;
+      const target = handDirection(hand, 0, 9, depthScale);
+      if (target)
+        desiredWorld = new THREE.Quaternion()
+          .setFromUnitVectors(saved.worldDirection, target)
+          .multiply(saved.worldQuaternion)
+          .normalize();
+      else if (usable([...rule.from, ...rule.to], pose)) {
+        const fallback = poseDirection(rule.from, rule.to, pose, depthScale);
+        if (
+          fallback.lengthSq() > EPSILON &&
+          saved.worldDirection.lengthSq() > EPSILON
+        )
+          desiredWorld = new THREE.Quaternion()
+            .setFromUnitVectors(saved.worldDirection, fallback)
+            .multiply(saved.worldQuaternion)
+            .normalize();
+      }
     } else if (usable([...rule.from, ...rule.to], pose)) {
       const target = poseDirection(rule.from, rule.to, pose, depthScale);
       if (
@@ -489,7 +752,8 @@ export function retargetSkeleton(
       )
         desiredWorld = new THREE.Quaternion()
           .setFromUnitVectors(saved.worldDirection, target)
-          .multiply(saved.worldQuaternion);
+          .multiply(saved.worldQuaternion)
+          .normalize();
     }
     if (!desiredWorld) {
       // Keeping the restored local rotation safely inherits the final parent.
@@ -500,14 +764,47 @@ export function retargetSkeleton(
     const parentWorld =
       bone.parent?.getWorldQuaternion(new THREE.Quaternion()) ??
       new THREE.Quaternion();
-    bone.quaternion.copy(parentWorld.invert().multiply(desiredWorld));
+    // local = inverse(parent target world) * target world * rest correction.
+    // `desiredWorld` already includes that correction.  Minimal-vector swing
+    // above leaves the unobservable rest-pose twist intact.
+    bone.quaternion
+      .copy(parentWorld.invert().multiply(desiredWorld))
+      .normalize();
     model.updateWorldMatrix(true, true);
     report.appliedBones++;
   }
-  const hips = model.getObjectByName("mixamorig:Hips");
-  if (hips && usable([23, 24], pose)) {
-    const center = average([23, 24], pose, depthScale);
-    hips.position.add(center);
+  // Finger observations are applied parent-first after the palm. Missing,
+  // mismatched, occluded, and low-confidence hands remain at immutable rest.
+  for (const rule of HAND_BONE_RULES) {
+    const bone = model.getObjectByName(rule.bone);
+    const saved = rest.get(rule.bone);
+    if (!bone || !saved) {
+      report.missingBones.push(rule.bone);
+      continue;
+    }
+    const hand = pose.hands?.[rule.side];
+    if (!usableHand(hand)) {
+      report.skippedBones.push(rule.bone);
+      continue;
+    }
+    let target = handDirection(hand, rule.from, rule.to, depthScale);
+    if (target && rule.distalBlend === 0.7) {
+      const previous = handDirection(
+        hand,
+        rule.from - 1,
+        rule.from,
+        depthScale,
+      );
+      if (previous)
+        target = previous.lerp(target, rule.distalBlend).normalize();
+    }
+    if (!target || saved.worldDirection.lengthSq() <= EPSILON) {
+      report.skippedBones.push(rule.bone);
+      continue;
+    }
+    applyWorldDirection(bone, saved, target);
+    model.updateWorldMatrix(true, true);
+    report.appliedBones++;
   }
   model.updateWorldMatrix(true, true);
   return report;
@@ -571,7 +868,7 @@ export class BodyViewer {
     this.corrections.clear();
     this.fit();
     this.retarget();
-    this.alignToImage();
+    this.updateImageAlignment();
     return this.lastReport;
   }
   private lastReport: RetargetReport = {
@@ -585,6 +882,7 @@ export class BodyViewer {
       `${import.meta.env.BASE_URL}runtime/body.glb`,
     );
     this.model = gltf.scene;
+    restoreMixamoBoneNames(this.model);
     this.scene.add(this.model);
     this.rest = captureRestPose(this.model);
   }
@@ -601,6 +899,11 @@ export class BodyViewer {
       if (bone) this.posed.set(r.bone, bone.quaternion.clone());
     }
     this.applyProportionsAndCorrections();
+  }
+  private updateImageAlignment() {
+    // Camera fitting and root translation are deliberately separate operations.
+    this.alignToImage();
+    this.alignRootToPelvis();
   }
   private alignToImage() {
     if (!this.model || !this.pose || !this.imageSize) return;
@@ -638,18 +941,24 @@ export class BodyViewer {
       },
       this.camera.fov,
     );
-    const z = new THREE.Box3()
-      .setFromObject(this.model)
-      .getCenter(new THREE.Vector3()).z;
-    // Keep the subject on the front projection plane; camera target handles
-    // the fitted 2D translation while distance supplies the fitted zoom.
-    this.model.position.z -= z;
-    this.model.updateWorldMatrix(true, true);
     this.controls.target.set(result.target.x, result.target.y, 0);
     this.camera.zoom = 1;
     this.camera.updateProjectionMatrix();
     this.camera.position.set(result.target.x, result.target.y, result.distance);
     this.controls.update();
+  }
+  private alignRootToPelvis() {
+    if (!this.model || !this.pose || !this.imageSize) return;
+    const hips = this.model.getObjectByName("mixamorig:Hips");
+    if (!hips) return;
+    alignRootToImagePelvis(
+      this.model,
+      hips,
+      this.pose.landmarks,
+      this.imageSize,
+      { width: this.host.clientWidth, height: this.host.clientHeight },
+      this.camera,
+    );
   }
   private reportAngle = () => {
     const direction = this.camera.position
@@ -665,7 +974,7 @@ export class BodyViewer {
   setDepthScale(v: number) {
     this.depthScale = v;
     this.retarget();
-    this.alignToImage();
+    this.updateImageAlignment();
   }
   setBodyWidth(v: number) {
     this.proportions.width = v;
@@ -682,7 +991,7 @@ export class BodyViewer {
   }
   private rebuildModel() {
     this.retarget(); // fixed order: pose first, then rest-based proportions/corrections
-    this.alignToImage();
+    this.updateImageAlignment();
   }
   private applyProportionsAndCorrections() {
     if (!this.model) return;
@@ -745,17 +1054,17 @@ export class BodyViewer {
       }),
     );
     this.applyCorrections();
-    this.alignToImage();
+    this.updateImageAlignment();
   }
   resetJoint(id: JointId) {
     this.corrections.delete(id);
     this.applyCorrections();
-    this.alignToImage();
+    this.updateImageAlignment();
   }
   resetPose() {
     this.corrections.clear();
     this.applyCorrections();
-    this.alignToImage();
+    this.updateImageAlignment();
   }
   private applyCorrections() {
     if (!this.model) return;
@@ -830,62 +1139,92 @@ export class BodyViewer {
       this.onSelect?.(id);
     }
   };
-  captureDepth(size = 512) {
+  /** Capture a source-image-aligned front/back depth, mask and normal G-buffer. */
+  captureDepth(width = 512, height = width): RigSurfaceBuffer {
     if (!this.model) throw new Error("素体が読み込まれていません");
     this.rebuildModel();
     this.model.updateWorldMatrix(true, true);
-    const box = new THREE.Box3().setFromObject(this.model),
-      center = box.getCenter(new THREE.Vector3()),
-      span =
-        Math.max(
-          box.getSize(new THREE.Vector3()).x,
-          box.getSize(new THREE.Vector3()).y,
-        ) * 0.58;
-    const target = new THREE.WebGLRenderTarget(size, size, {
+    const target = new THREE.WebGLRenderTarget(width, height, {
       type: THREE.UnsignedByteType,
       format: THREE.RGBAFormat,
       depthBuffer: true,
     });
-    const camera = new THREE.OrthographicCamera(
-      -span,
-      span,
-      span,
-      -span,
-      0.1,
-      10,
-    );
-    camera.position.set(center.x, center.y, center.z + 4);
-    camera.lookAt(center);
+    const camera = this.camera.clone();
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
     const previous = this.scene.overrideMaterial;
     this.helper.visible = false;
-    this.scene.overrideMaterial = new THREE.MeshDepthMaterial({
-      depthPacking: THREE.RGBADepthPacking,
-    });
-    this.renderer.setRenderTarget(target);
-    this.renderer.clear();
-    this.renderer.render(this.scene, camera);
-    const rgba = new Uint8Array(size * size * 4);
-    this.renderer.readRenderTargetPixels(target, 0, 0, size, size, rgba);
+    const render = (material: THREE.Material) => {
+      this.scene.overrideMaterial = material;
+      this.renderer.setRenderTarget(target);
+      this.renderer.clear();
+      this.renderer.render(this.scene, camera);
+      const pixels = new Uint8Array(width * height * 4);
+      this.renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels);
+      material.dispose();
+      return pixels;
+    };
+    const packedFront = render(
+      new THREE.MeshDepthMaterial({
+        depthPacking: THREE.RGBADepthPacking,
+        side: THREE.FrontSide,
+      }),
+    );
+    const packedBack = render(
+      new THREE.MeshDepthMaterial({
+        depthPacking: THREE.RGBADepthPacking,
+        side: THREE.BackSide,
+      }),
+    );
+    const packedNormal = render(
+      new THREE.MeshNormalMaterial({ side: THREE.FrontSide }),
+    );
     this.renderer.setRenderTarget(null);
     this.scene.overrideMaterial = previous;
     this.helper.visible = true;
     target.dispose();
-    const result = new Float32Array(size * size);
-    for (let y = 0; y < size; y++)
-      for (let x = 0; x < size; x++) {
-        const s = ((size - 1 - y) * size + x) * 4,
-          d = y * size + x;
-        result[d] =
-          rgba[s] / 255 / 256 ** 3 +
-          rgba[s + 1] / 255 / 256 ** 2 +
-          rgba[s + 2] / 255 / 256 +
-          rgba[s + 3] / 255;
+    const frontDepth = new Float32Array(width * height),
+      backDepth = new Float32Array(width * height),
+      mask = new Uint8Array(width * height),
+      normal = new Float32Array(width * height * 3);
+    const unpack = (p: Uint8Array, s: number) =>
+      p[s] / 255 / 256 ** 3 +
+      p[s + 1] / 255 / 256 ** 2 +
+      p[s + 2] / 255 / 256 +
+      p[s + 3] / 255;
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        const s = ((height - 1 - y) * width + x) * 4,
+          d = y * width + x;
+        frontDepth[d] = unpack(packedFront, s);
+        backDepth[d] = unpack(packedBack, s);
+        mask[d] = frontDepth[d] < 0.999 ? 1 : 0;
+        normal.set(
+          [
+            packedNormal[s] / 127.5 - 1,
+            packedNormal[s + 1] / 127.5 - 1,
+            packedNormal[s + 2] / 127.5 - 1,
+          ],
+          d * 3,
+        );
       }
-    return result;
+    const inverseProjectionView = new THREE.Matrix4()
+      .multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+      .invert();
+    return {
+      width,
+      height,
+      frontDepth,
+      backDepth,
+      mask,
+      normal,
+      inverseProjectionView: new Float32Array(inverseProjectionView.elements),
+    };
   }
   setView(view: "front" | "side" | "back" | "top") {
     if (view === "front" && this.imageSize) {
-      this.alignToImage();
+      this.updateImageAlignment();
       return;
     }
     const p = {
@@ -925,7 +1264,7 @@ export class BodyViewer {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h, false);
-    if (this.pose && this.imageSize) this.alignToImage();
+    if (this.pose && this.imageSize) this.updateImageAlignment();
   }
   private loop = () => {
     this.controls.update();

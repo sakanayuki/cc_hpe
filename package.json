@@ -9,7 +9,7 @@
     "build": "npm run prepare:assets && tsc -b && vite build",
     "verify:pages": "node scripts/verify-pages-build.mjs",
     "typecheck": "tsc -b --pretty false",
-    "test": "vitest run",
+    "test": "node scripts/prepare-runtime-assets.mjs --body-only && vitest run",
     "preview": "vite preview --host 0.0.0.0",
     "format:check": "prettier --check \"src/**/*.{ts,css}\" \"*.{ts,json,md}\""
   },
