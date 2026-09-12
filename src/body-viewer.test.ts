@@ -8,6 +8,7 @@ import {
   fitFrontProjection,
   landmarkToModel,
   poseDirection,
+  preservingCameraState,
   retargetSkeleton,
 } from "./body-viewer";
 import type { PoseGuidance } from "./pose";
@@ -27,6 +28,48 @@ const pose = {
   maskHeight: 1,
 } satisfies PoseGuidance;
 
+describe("camera state preservation", () => {
+  it.each([
+    "depth scale",
+    "body width",
+    "body height",
+    "limb lengths",
+    "joint correction",
+    "joint reset",
+    "pose reset",
+  ])("keeps arbitrary orbit/pan/zoom state during %s updates", () => {
+    const camera = new THREE.PerspectiveCamera(36, 1.7, 0.01, 100);
+    camera.position.set(2.4, -0.7, 4.1);
+    camera.quaternion.setFromEuler(new THREE.Euler(0.31, -0.46, 0.12));
+    camera.zoom = 2.35;
+    camera.updateProjectionMatrix();
+    const controls = {
+      target: new THREE.Vector3(-0.8, 1.3, 0.45),
+      update() {},
+    };
+    const expected = {
+      position: camera.position.clone(),
+      quaternion: camera.quaternion.clone(),
+      zoom: camera.zoom,
+      target: controls.target.clone(),
+    };
+
+    preservingCameraState(camera, controls, () => {
+      // Model recalculation must remain safe even if a future implementation
+      // temporarily uses camera-dependent image alignment internally.
+      camera.position.set(99, 98, 97);
+      camera.quaternion.identity();
+      camera.zoom = 0.25;
+      controls.target.set(-9, -8, -7);
+    });
+
+    expect(camera.position.toArray()).toEqual(expected.position.toArray());
+    expect(camera.quaternion.toArray()).toEqual(expected.quaternion.toArray());
+    expect(camera.zoom).toBe(expected.zoom);
+    expect(controls.target.toArray()).toEqual(expected.target.toArray());
+  });
+});
+
 describe("GLB pose retargeting", () => {
   const makeFrontFacingRig = () => {
     const hips = new THREE.Bone();
@@ -42,6 +85,9 @@ describe("GLB pose retargeting", () => {
     const spine = add(hips, "mixamorig:Spine", new THREE.Vector3(0, 1, 0));
     const spine1 = add(spine, "mixamorig:Spine1", new THREE.Vector3(0, 1, 0));
     const chest = add(spine1, "mixamorig:Spine2", new THREE.Vector3(0, 1, 0));
+    const neck = add(chest, "mixamorig:Neck", new THREE.Vector3(0, 0.4, 0));
+    const head = add(neck, "mixamorig:Head", new THREE.Vector3(0, 0.3, 0));
+    add(head, "mixamorig:HeadTop_End", new THREE.Vector3(0, 0.4, 0));
     const leftShoulder = add(
       chest,
       "mixamorig:LeftShoulder",
@@ -67,7 +113,16 @@ describe("GLB pose retargeting", () => {
     );
     add(rightLeg, "mixamorig:RightLeg", new THREE.Vector3(0, -1, 0));
     hips.updateWorldMatrix(true, true);
-    return { hips, chest, leftShoulder, rightShoulder, leftLeg, rightLeg };
+    return {
+      hips,
+      chest,
+      neck,
+      head,
+      leftShoulder,
+      rightShoulder,
+      leftLeg,
+      rightLeg,
+    };
   };
 
   const frontalPose = (depthOffset = 0) => {
@@ -81,6 +136,7 @@ describe("GLB pose retargeting", () => {
     put(12, 0.7, 2, depthOffset);
     put(7, -0.1, 3, 0);
     put(8, 0.1, 3, 0);
+    put(0, 0, 3, 1);
     put(25, -0.35, -1, depthOffset);
     put(26, 0.35, -1, -depthOffset);
     return p;
@@ -122,6 +178,33 @@ describe("GLB pose retargeting", () => {
     retargetSkeleton(rig.hips, frontalPose(0.01), rest);
     const after = rig.hips.getWorldQuaternion(new THREE.Quaternion());
     expect(Math.abs(before.dot(after))).toBeGreaterThan(0.999);
+  });
+
+  it("applies the Mixamo head offset once and composes manual correction onto it", () => {
+    const rig = makeFrontFacingRig();
+    const rest = captureRestPose(rig.hips);
+    const p = frontalPose();
+
+    retargetSkeleton(rig.hips, p, rest);
+    const estimatedHead = rig.head.quaternion.clone();
+    // Mixamo's authored head-forward axis is local -Z; the camera is on +Z.
+    const headFront = new THREE.Vector3(0, 0, -1).applyQuaternion(
+      rig.head.getWorldQuaternion(new THREE.Quaternion()),
+    );
+    expect(headFront.z).toBeGreaterThan(0.99);
+
+    retargetSkeleton(rig.hips, p, rest);
+    expect(Math.abs(rig.head.quaternion.dot(estimatedHead))).toBeCloseTo(1, 5);
+
+    const manual = new THREE.Euler(0, Math.PI / 6, 0, "XYZ");
+    applyJointCorrection(rig.head, rig.head.position.clone(), estimatedHead, {
+      rotation: manual,
+      translation: new THREE.Vector3(),
+    });
+    const expected = estimatedHead
+      .clone()
+      .multiply(new THREE.Quaternion().setFromEuler(manual));
+    expect(Math.abs(rig.head.quaternion.dot(expected))).toBeCloseTo(1, 5);
   });
 
   it("uses 3D world-landmark depth instead of flattened image coordinates", () => {
@@ -219,6 +302,47 @@ describe("GLB pose retargeting", () => {
     retargetSkeleton(hips, p, rest);
     expect(Math.abs(hips.quaternion.dot(onceQ))).toBeCloseTo(1);
     expect(hips.position.distanceTo(onceP)).toBeCloseTo(0);
+  });
+
+  it("switches only the hips local facing by 180 degrees without accumulating", () => {
+    const rig = makeFrontFacingRig();
+    const rest = captureRestPose(rig.hips);
+    const p = frontalPose();
+
+    retargetSkeleton(rig.hips, p, rest, 1, "front");
+    const frontHips = rig.hips.quaternion.clone();
+    const frontSpine = rig.hips
+      .getObjectByName("mixamorig:Spine")!
+      .quaternion.clone();
+    const frontSpine1 = rig.hips
+      .getObjectByName("mixamorig:Spine1")!
+      .quaternion.clone();
+    const frontChest = rig.chest.quaternion.clone();
+
+    retargetSkeleton(rig.hips, p, rest, 1, "back");
+    const backHips = rig.hips.quaternion.clone();
+    const angularDifference =
+      2 *
+      Math.acos(
+        THREE.MathUtils.clamp(Math.abs(frontHips.dot(backHips)), -1, 1),
+      );
+    expect(angularDifference).toBeCloseTo(Math.PI, 5);
+    expect(
+      Math.abs(
+        rig.hips.getObjectByName("mixamorig:Spine")!.quaternion.dot(frontSpine),
+      ),
+    ).toBeCloseTo(1, 5);
+    expect(
+      Math.abs(
+        rig.hips
+          .getObjectByName("mixamorig:Spine1")!
+          .quaternion.dot(frontSpine1),
+      ),
+    ).toBeCloseTo(1, 5);
+    expect(Math.abs(rig.chest.quaternion.dot(frontChest))).toBeCloseTo(1, 5);
+
+    retargetSkeleton(rig.hips, p, rest, 1, "back");
+    expect(Math.abs(rig.hips.quaternion.dot(backHips))).toBeCloseTo(1, 5);
   });
 
   it("distributes simultaneous hip yaw, torso lean, and shoulder roll through the real spine chain", () => {
@@ -523,6 +647,59 @@ describe("front image/GLB projection alignment", () => {
     expect(fit.normalizedRmsError).toBeLessThan(0.01);
     expect(fit.pixelsPerWorldUnit).toBeGreaterThan(0);
     expect(fit.distance).toBeGreaterThan(0);
+  });
+
+  it("filters NaN correspondences and rejects a degenerate projection", () => {
+    const size = { width: 100, height: 100 };
+    const fit = fitFrontProjection(
+      [
+        { x: 0, y: 0 },
+        { x: 1, y: 1 },
+        { x: NaN, y: 2 },
+      ],
+      [
+        { x: 0.2, y: 0.8 },
+        { x: 0.8, y: 0.2 },
+        { x: 0.5, y: 0.5 },
+      ],
+      size,
+      size,
+    );
+    expect(fit.distance).toBeGreaterThan(0);
+    expect(() =>
+      fitFrontProjection(
+        [
+          { x: 1, y: 1 },
+          { x: 1, y: 1 },
+        ],
+        [
+          { x: 0.2, y: 0.2 },
+          { x: 0.8, y: 0.8 },
+        ],
+        size,
+        size,
+      ),
+    ).toThrow("分散が不足");
+  });
+
+  it("does not move the root for a non-finite pelvis landmark", () => {
+    const root = new THREE.Group();
+    const hips = new THREE.Bone();
+    root.add(hips);
+    root.position.set(1, 2, 3);
+    const invalid = structuredClone(points);
+    invalid[23].x = NaN;
+    expect(
+      alignRootToImagePelvis(
+        root,
+        hips,
+        invalid,
+        { width: 100, height: 100 },
+        { width: 100, height: 100 },
+        new THREE.PerspectiveCamera(),
+      ),
+    ).toBe(false);
+    expect(root.position.toArray()).toEqual([1, 2, 3]);
   });
 });
 

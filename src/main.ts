@@ -10,6 +10,7 @@ import {
   EDITABLE_JOINTS,
   isCompleteBodyRetarget,
   JOINT_LABELS,
+  type HipFacing,
   type JointId,
 } from "./body-viewer";
 
@@ -35,6 +36,7 @@ app.innerHTML = `
           </div></details>
           <details class="control-section joint-editor" open><summary><span>関節補正</span><small>選択・回転・移動・リセット</small></summary><div class="section-content">
             <div id="poseQuality" class="pose-quality"></div>
+            <label class="joint-field"><span>腰の向き</span><select id="hipFacing"><option value="front" selected>前向き</option><option value="back">後ろ向き</option></select></label>
             <label class="joint-field"><span>補正する関節</span><select id="joint">${EDITABLE_JOINTS.map((id) => `<option value="${id}">${JOINT_LABELS[id]}</option>`).join("")}</select></label>
             <fieldset class="axis-group"><legend>回転 XYZ（角度）</legend><div class="joint-axes">${["X", "Y", "Z"].map((axis) => `<label><span class="axis-name">${axis}</span><input id="jointR${axis}" aria-label="回転 ${axis}" type="range" min="-90" max="90" value="0"/><output id="jointR${axis}Out">0°</output></label>`).join("")}</div></fieldset>
             <fieldset class="axis-group"><legend>移動 XYZ（モデル単位）</legend><div class="joint-axes">${["X", "Y", "Z"].map((axis) => `<label><span class="axis-name">${axis}</span><input id="jointT${axis}" aria-label="移動 ${axis}" type="range" min="-0.15" max="0.15" step="0.01" value="0"/><output id="jointT${axis}Out">0.00</output></label>`).join("")}</div></fieldset>
@@ -164,12 +166,16 @@ const poseDepth = byId<HTMLInputElement>("poseDepth"),
   bodyHeight = byId<HTMLInputElement>("bodyHeight"),
   armLength = byId<HTMLInputElement>("armLength"),
   legLength = byId<HTMLInputElement>("legLength"),
+  hipFacing = byId<HTMLSelectElement>("hipFacing"),
   joint = byId<HTMLSelectElement>("joint");
 const jointAxes = ["X", "Y", "Z"] as const;
 poseDepth.addEventListener("input", () => {
   byId<HTMLOutputElement>("poseDepthOut").value = `${poseDepth.value}%`;
   bodyViewer.setDepthScale(Number(poseDepth.value) / 100);
 });
+hipFacing.addEventListener("change", () =>
+  bodyViewer.setHipFacing(hipFacing.value as HipFacing),
+);
 bodyWidth.addEventListener("input", () => {
   byId<HTMLOutputElement>("bodyWidthOut").value = `${bodyWidth.value}%`;
   bodyViewer.setBodyWidth(Number(bodyWidth.value) / 100);

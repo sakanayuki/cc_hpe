@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GaussianSource, imageToCloud } from "./gaussian";
+import { cleanupCloud, GaussianSource, imageToCloud } from "./gaussian";
 import { exportPly, exportSplat, exportSpz } from "./exporters";
 
 const landmarks = Array.from({ length: 33 }, (_, i) => ({
@@ -36,6 +36,38 @@ const cloud = imageToCloud(
 );
 
 describe("pose-guided Gaussian pipeline", () => {
+  it("rejects near-zero homogeneous w instead of emitting invalid positions", () => {
+    const invalid = pose(new Float32Array([1, 1, 1, 1]));
+    invalid.rigSurface.inverseProjectionView.fill(0);
+    expect(() =>
+      imageToCloud(
+        { data: pixels, width: 2, height: 2 } as ImageData,
+        { maxSplats: 4, depthStrength: 1, alphaThreshold: 8 },
+        invalid,
+      ),
+    ).toThrow("有効な3D点が残りませんでした");
+  });
+  it("removes splats with NaN quaternion or depth", () => {
+    const base = {
+      p: [0, 0, 0],
+      s: [0.01, 0.01, 0.01],
+      q: [0, 0, 0, 1],
+      c: [255, 255, 255, 255],
+      opacity: 1,
+      depth: 0,
+      confidence: 1,
+      source: 0,
+    };
+    expect(
+      cleanupCloud(
+        [
+          { ...base, q: [NaN, 0, 0, 1] },
+          { ...base, depth: NaN },
+        ] as never[],
+        0.01,
+      ),
+    ).toHaveLength(0);
+  });
   it("emits one observed surface per sampled UV instead of three fixed offsets", () => {
     const observed = [...cloud.layer].filter(
       (source) => source === GaussianSource.ObservedSurface,
