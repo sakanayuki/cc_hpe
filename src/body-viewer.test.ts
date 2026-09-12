@@ -565,6 +565,59 @@ describe("front image/GLB projection alignment", () => {
     expect(fit.pixelsPerWorldUnit).toBeGreaterThan(0);
     expect(fit.distance).toBeGreaterThan(0);
   });
+
+  it("filters NaN correspondences and rejects a degenerate projection", () => {
+    const size = { width: 100, height: 100 };
+    const fit = fitFrontProjection(
+      [
+        { x: 0, y: 0 },
+        { x: 1, y: 1 },
+        { x: NaN, y: 2 },
+      ],
+      [
+        { x: 0.2, y: 0.8 },
+        { x: 0.8, y: 0.2 },
+        { x: 0.5, y: 0.5 },
+      ],
+      size,
+      size,
+    );
+    expect(fit.distance).toBeGreaterThan(0);
+    expect(() =>
+      fitFrontProjection(
+        [
+          { x: 1, y: 1 },
+          { x: 1, y: 1 },
+        ],
+        [
+          { x: 0.2, y: 0.2 },
+          { x: 0.8, y: 0.8 },
+        ],
+        size,
+        size,
+      ),
+    ).toThrow("分散が不足");
+  });
+
+  it("does not move the root for a non-finite pelvis landmark", () => {
+    const root = new THREE.Group();
+    const hips = new THREE.Bone();
+    root.add(hips);
+    root.position.set(1, 2, 3);
+    const invalid = structuredClone(points);
+    invalid[23].x = NaN;
+    expect(
+      alignRootToImagePelvis(
+        root,
+        hips,
+        invalid,
+        { width: 100, height: 100 },
+        { width: 100, height: 100 },
+        new THREE.PerspectiveCamera(),
+      ),
+    ).toBe(false);
+    expect(root.position.toArray()).toEqual([1, 2, 3]);
+  });
 });
 
 describe("rest-based body and joint editing", () => {

@@ -376,18 +376,36 @@ export function fitFrontProjection(
   viewport: Size,
   verticalFovDegrees = 36,
 ): FrontAlignment {
-  if (modelPoints.length !== imagePoints.length || modelPoints.length < 2)
+  if (modelPoints.length !== imagePoints.length)
+    throw new Error("正面位置合わせの対応点数が一致しません");
+  if (
+    ![
+      imageSize.width,
+      imageSize.height,
+      viewport.width,
+      viewport.height,
+      verticalFovDegrees,
+    ].every((v) => Number.isFinite(v) && v > 0)
+  )
+    throw new Error("画像または表示領域のサイズが不正です");
+  const pairs = modelPoints
+    .map((model, i) => ({ model, image: imagePoints[i] }))
+    .filter(({ model, image }) =>
+      [model.x, model.y, image.x, image.y].every(Number.isFinite),
+    );
+  if (pairs.length < 2)
     throw new Error("正面位置合わせには2点以上の対応点が必要です");
   const rect = getContainRect(imageSize, viewport);
-  const pixels = imagePoints.map((point) => mapLandmarkToContain(point, rect));
+  const validModels = pairs.map(({ model }) => model);
+  const pixels = pairs.map(({ image }) => mapLandmarkToContain(image, rect));
   const mean = (values: Point[]) =>
     values.reduce((sum, p) => ({ x: sum.x + p.x, y: sum.y + p.y }), {
       x: 0,
       y: 0,
     });
-  const mc = mean(modelPoints),
+  const mc = mean(validModels),
     pc = mean(pixels),
-    n = modelPoints.length;
+    n = validModels.length;
   mc.x /= n;
   mc.y /= n;
   pc.x /= n;
@@ -395,23 +413,27 @@ export function fitFrontProjection(
   let numerator = 0,
     denominator = 0;
   for (let i = 0; i < n; i++) {
-    const mx = modelPoints[i].x - mc.x,
-      my = modelPoints[i].y - mc.y;
+    const mx = validModels[i].x - mc.x,
+      my = validModels[i].y - mc.y;
     numerator += mx * (pixels[i].x - pc.x) + my * (pc.y - pixels[i].y);
     denominator += mx * mx + my * my;
   }
-  const scale = Math.max(EPSILON, numerator / Math.max(EPSILON, denominator));
+  if (!Number.isFinite(denominator) || denominator <= EPSILON)
+    throw new Error("対応点の分散が不足しているため正面位置合わせできません");
+  const scale = numerator / denominator;
+  if (!Number.isFinite(scale) || scale <= EPSILON)
+    throw new Error("正面位置合わせの縮尺を算出できません");
   const target = {
     x: mc.x - (pc.x - viewport.width / 2) / scale,
     y: mc.y + (pc.y - viewport.height / 2) / scale,
   };
   let squaredError = 0;
   for (let i = 0; i < n; i++) {
-    const x = viewport.width / 2 + (modelPoints[i].x - target.x) * scale;
-    const y = viewport.height / 2 - (modelPoints[i].y - target.y) * scale;
+    const x = viewport.width / 2 + (validModels[i].x - target.x) * scale;
+    const y = viewport.height / 2 - (validModels[i].y - target.y) * scale;
     squaredError += (x - pixels[i].x) ** 2 + (y - pixels[i].y) ** 2;
   }
-  return {
+  const result = {
     target,
     pixelsPerWorldUnit: scale,
     distance:
@@ -420,6 +442,17 @@ export function fitFrontProjection(
     normalizedRmsError:
       Math.sqrt(squaredError / n) / Math.hypot(rect.width, rect.height),
   };
+  if (
+    ![
+      result.target.x,
+      result.target.y,
+      result.pixelsPerWorldUnit,
+      result.distance,
+      result.normalizedRmsError,
+    ].every(Number.isFinite)
+  )
+    throw new Error("正面位置合わせの計算結果が不正です");
+  return result;
 }
 
 /**
@@ -439,7 +472,25 @@ export function alignRootToImagePelvis(
   viewport: Size,
   camera: THREE.Camera,
 ) {
-  if (!landmarks[23] || !landmarks[24] || !viewport.width || !viewport.height)
+  const finite = (...values: number[]) => values.every(Number.isFinite);
+  if (
+    !landmarks[23] ||
+    !landmarks[24] ||
+    !finite(
+      landmarks[23].x,
+      landmarks[23].y,
+      landmarks[24].x,
+      landmarks[24].y,
+      imageSize.width,
+      imageSize.height,
+      viewport.width,
+      viewport.height,
+    ) ||
+    imageSize.width <= 0 ||
+    imageSize.height <= 0 ||
+    viewport.width <= 0 ||
+    viewport.height <= 0
+  )
     return false;
   const pelvis = {
     x: (landmarks[23].x + landmarks[24].x) / 2,
@@ -460,13 +511,22 @@ export function alignRootToImagePelvis(
     1 - (pixel.y / viewport.height) * 2,
     clip.z,
   ).unproject(camera);
+  if (![hipsWorld, clip, desiredHipsWorld].every((v) => finite(v.x, v.y, v.z)))
+    return false;
   const desiredRootWorld = modelRoot
     .getWorldPosition(new THREE.Vector3())
     .add(desiredHipsWorld.sub(hipsWorld));
-  if (modelRoot.parent)
-    desiredRootWorld.applyMatrix4(
-      modelRoot.parent.matrixWorld.clone().invert(),
-    );
+  if (modelRoot.parent) {
+    const parentMatrix = modelRoot.parent.matrixWorld;
+    if (
+      ![...parentMatrix.elements].every(Number.isFinite) ||
+      Math.abs(parentMatrix.determinant()) <= EPSILON
+    )
+      return false;
+    desiredRootWorld.applyMatrix4(parentMatrix.clone().invert());
+  }
+  if (!finite(desiredRootWorld.x, desiredRootWorld.y, desiredRootWorld.z))
+    return false;
   modelRoot.position.copy(desiredRootWorld);
   modelRoot.updateWorldMatrix(true, true);
   return true;
@@ -983,6 +1043,7 @@ export class BodyViewer {
     const usablePairs = pairs.filter(
       ([i, name]) =>
         this.model!.getObjectByName(name) &&
+        this.pose!.landmarks[i] &&
         (this.pose!.landmarks[i].visibility ?? 1) >= MIN_VISIBILITY,
     );
     if (usablePairs.length < 2) return;
@@ -994,16 +1055,21 @@ export class BodyViewer {
       return { x: p.x, y: p.y };
     });
     const image = usablePairs.map(([i]) => this.pose!.landmarks[i]);
-    const result = fitFrontProjection(
-      world,
-      image,
-      this.imageSize,
-      {
-        width: this.host.clientWidth,
-        height: this.host.clientHeight,
-      },
-      this.camera.fov,
-    );
+    let result: FrontAlignment;
+    try {
+      result = fitFrontProjection(
+        world,
+        image,
+        this.imageSize,
+        {
+          width: this.host.clientWidth,
+          height: this.host.clientHeight,
+        },
+        this.camera.fov,
+      );
+    } catch {
+      return;
+    }
     this.controls.target.set(result.target.x, result.target.y, 0);
     this.camera.zoom = 1;
     this.camera.updateProjectionMatrix();
@@ -1160,6 +1226,7 @@ export class BodyViewer {
       if (!b) continue;
       const p = new THREE.Vector3();
       b.getWorldPosition(p);
+      if (![p.x, p.y, p.z].every(Number.isFinite)) continue;
       const material = new THREE.MeshBasicMaterial({
         color: r.id === this.selected ? 0xff9bd2 : 0x9f83ff,
         depthTest: false,
@@ -1176,6 +1243,7 @@ export class BodyViewer {
       if (child) {
         const q = new THREE.Vector3();
         child.getWorldPosition(q);
+        if (![q.x, q.y, q.z].every(Number.isFinite)) continue;
         const geometry = new THREE.BufferGeometry().setFromPoints([p, q]);
         const line = new THREE.Line(
           geometry,

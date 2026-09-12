@@ -47,6 +47,7 @@ function unproject(
     ny = 1 - ((y + 0.5) / g.height) * 2,
     nz = depth * 2 - 1;
   const w = e[3] * nx + e[7] * ny + e[11] * nz + e[15];
+  if (!Number.isFinite(w) || Math.abs(w) < 1e-8) return [NaN, NaN, NaN];
   return [
     (e[0] * nx + e[4] * ny + e[8] * nz + e[12]) / w,
     (e[1] * nx + e[5] * ny + e[9] * nz + e[13]) / w,
@@ -102,10 +103,14 @@ export function cleanupCloud(points: Splat[], pixelWorldSize: number): Splat[] {
   const finite = points.filter(
     (v) =>
       v.opacity >= 0.04 &&
+      [v.opacity, v.depth, v.confidence].every(Number.isFinite) &&
       v.s.every(
         (x) => Number.isFinite(x) && x > 0 && x <= pixelWorldSize * 5,
       ) &&
-      v.p.every(Number.isFinite),
+      v.p.every(Number.isFinite) &&
+      v.q.every(Number.isFinite) &&
+      Number.isFinite(Math.hypot(...v.q)) &&
+      Math.hypot(...v.q) > 1e-6,
   );
   if (!finite.length) return [];
   const zs = finite.map((v) => v.p[2]).sort((a, b) => a - b),
@@ -253,6 +258,10 @@ export function imageToCloud(
     depth = new Float32Array(n),
     confidence = new Float32Array(n),
     layer = new Uint8Array(n);
+  if (!n)
+    throw new Error(
+      "有効な3D点が残りませんでした。深度または姿勢データを確認してください。",
+    );
   clean.forEach((v, i) => {
     position.set(v.p, i * 3);
     scale.set(v.s, i * 3);
