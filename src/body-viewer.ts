@@ -1033,6 +1033,12 @@ export class BodyViewer {
   private correctionBasePositions = new Map<string, THREE.Vector3>();
   private corrections = new Map<JointId, JointCorrection>();
   private helper = new THREE.Group();
+  private helperTheme: "dark" | "light" = "dark";
+
+  setTheme(theme: "dark" | "light") {
+    this.helperTheme = theme;
+    this.updateHelper();
+  }
   private proportions: BodyProportions = { ...DEFAULT_PROPORTIONS };
   private selected: JointId = "hips";
   private depthScale = 1;
@@ -1319,7 +1325,14 @@ export class BodyViewer {
       b.getWorldPosition(p);
       if (![p.x, p.y, p.z].every(Number.isFinite)) continue;
       const material = new THREE.MeshBasicMaterial({
-        color: r.id === this.selected ? 0xff9bd2 : 0x9f83ff,
+        color:
+          r.id === this.selected
+            ? this.helperTheme === "light"
+              ? 0xa30d59
+              : 0xff9bd2
+            : this.helperTheme === "light"
+              ? 0x57339d
+              : 0x9f83ff,
         depthTest: false,
       });
       const sphere = new THREE.Mesh(
@@ -1339,7 +1352,7 @@ export class BodyViewer {
         const line = new THREE.Line(
           geometry,
           new THREE.LineBasicMaterial({
-            color: 0x8b72d8,
+            color: this.helperTheme === "light" ? 0x493078 : 0x8b72d8,
             depthTest: false,
             transparent: true,
             opacity: 0.8,
@@ -1447,6 +1460,19 @@ export class BodyViewer {
       mask,
       normal,
       inverseProjectionView: new Float32Array(inverseProjectionView.elements),
+      camera: {
+        position: camera.position.toArray() as [number, number, number],
+        target: this.controls.target.toArray() as [number, number, number],
+        frontAngleDegrees:
+          camera.position
+            .clone()
+            .sub(this.controls.target)
+            .angleTo(new THREE.Vector3(0, 0, 1)) *
+          (180 / Math.PI),
+        projectionMatrixFinite: camera.projectionMatrix.elements.every(
+          Number.isFinite,
+        ),
+      },
     };
   }
   setView(view: "front" | "side" | "back" | "top") {
