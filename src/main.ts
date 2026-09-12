@@ -22,27 +22,31 @@ app.innerHTML = `
     <section class="hero" aria-labelledby="title"><div><p class="eyebrow">BROWSER-ONLY 3D CREATION</p><h1 id="title">一枚の写真に、<br><em>奥行きを。</em></h1><p class="lead">人物写真から姿勢と深度を推定し、Gaussian Splatとして立体化します。画像が端末の外に送信されることはありません。</p></div><div class="chips"><span>WebGPU</span><span>最大 500K splats</span><span>PLY / SPLAT</span></div></section>
     <section class="workspace">
       <aside class="panel controls" aria-label="生成設定">
-        <div class="step"><span>01</span><div><b>写真を選択</b><small>人物が1人の画像</small></div></div>
-        <label class="drop" id="drop"><input id="file" type="file" accept="image/png,image/jpeg,image/webp"/><span class="upload-icon">＋</span><strong>写真をドロップ</strong><small>またはクリックして選択 · JPG / PNG / WebP</small></label>
-        <div id="thumbWrap" class="thumb-wrap hidden"><img id="thumb" alt="選択した人物写真"/><canvas id="poseOverlay" aria-label="推定骨格"></canvas><button id="clear" aria-label="写真を削除">×</button></div>
-        <button class="primary" id="estimate" disabled><span>1</span> 姿勢を推定して素体を表示</button>
+        <details class="control-section photo-section" open><summary><span class="step-number">01</span><span><b>写真を選択</b><small>人物が1人の画像</small></span></summary><div class="section-content">
+          <label class="drop" id="drop"><input id="file" type="file" accept="image/png,image/jpeg,image/webp"/><span class="upload-icon">＋</span><strong>写真をドロップ</strong><small>またはクリックして選択 · JPG / PNG / WebP</small></label>
+          <div id="thumbWrap" class="thumb-wrap hidden"><img id="thumb" alt="選択した人物写真"/><canvas id="poseOverlay" aria-label="推定骨格"></canvas><button id="clear" aria-label="写真を削除">×</button></div>
+          <button class="primary" id="estimate" disabled><span>1</span> 姿勢を推定して素体を表示</button>
+        </div></details>
         <div id="poseControls" class="pose-controls hidden">
-          <h3>素体・関節の補正</h3>
-          <div class="reference-controls"><label><input id="showReference" type="checkbox" checked/> 元画像を表示</label><label class="field"><span>透過率 <output id="referenceOpacityOut">45%</output></span><input id="referenceOpacity" type="range" min="0" max="100" value="45"/></label></div>
-          <label class="field"><span>姿勢の奥行き <output id="poseDepthOut">100%</output></span><input id="poseDepth" type="range" min="25" max="200" value="100"/></label>
-          <label class="field"><span>体幅 <output id="bodyWidthOut">100%</output></span><input id="bodyWidth" type="range" min="70" max="140" value="100"/></label><label class="field"><span>身長比 <output id="bodyHeightOut">100%</output></span><input id="bodyHeight" type="range" min="80" max="120" value="100"/></label><label class="field"><span>腕の長さ <output id="armLengthOut">100%</output></span><input id="armLength" type="range" min="75" max="130" value="100"/></label><label class="field"><span>脚の長さ <output id="legLengthOut">100%</output></span><input id="legLength" type="range" min="75" max="130" value="100"/></label>
-          <div id="poseQuality" class="pose-quality"></div>
-          <label class="joint-field"><span>補正する関節</span><select id="joint">${EDITABLE_JOINTS.map((id) => `<option value="${id}">${JOINT_LABELS[id]}</option>`).join("")}</select></label>
-          <h4>回転 XYZ（角度）</h4><div class="joint-axes">${["X", "Y", "Z"].map((axis) => `<label><span>${axis} <output id="jointR${axis}Out">0°</output></span><input id="jointR${axis}" type="range" min="-90" max="90" value="0"/></label>`).join("")}</div>
-          <h4>移動 XYZ（モデル単位）</h4><div class="joint-axes">${["X", "Y", "Z"].map((axis) => `<label><span>${axis} <output id="jointT${axis}Out">0.00</output></span><input id="jointT${axis}" type="range" min="-0.15" max="0.15" step="0.01" value="0"/></label>`).join("")}</div>
-          <div class="edit-actions"><button id="resetJoint">選択関節を戻す</button><button id="resetPose">回転・移動を全て戻す</button><button id="resetAll">体型を含む全補正を戻す</button></div>
-          <p>紫の関節をクリックして選択し、回転または親座標系での移動を調整してください。</p>
+          <details class="control-section body-section"><summary><span>体型調整</span><small>画像比較・体型・奥行き</small></summary><div class="section-content">
+            <div class="reference-controls"><label><input id="showReference" type="checkbox" checked/> 元画像を表示</label><label class="field"><span>透過率 <output id="referenceOpacityOut">45%</output></span><input id="referenceOpacity" type="range" min="0" max="100" value="45"/></label></div>
+            <label class="field"><span>姿勢の奥行き <output id="poseDepthOut">100%</output></span><input id="poseDepth" type="range" min="25" max="200" value="100"/></label>
+            <label class="field"><span>体幅 <output id="bodyWidthOut">100%</output></span><input id="bodyWidth" type="range" min="70" max="140" value="100"/></label><label class="field"><span>身長比 <output id="bodyHeightOut">100%</output></span><input id="bodyHeight" type="range" min="80" max="120" value="100"/></label><label class="field"><span>腕の長さ <output id="armLengthOut">100%</output></span><input id="armLength" type="range" min="75" max="130" value="100"/></label><label class="field"><span>脚の長さ <output id="legLengthOut">100%</output></span><input id="legLength" type="range" min="75" max="130" value="100"/></label>
+          </div></details>
+          <details class="control-section joint-editor" open><summary><span>関節補正</span><small>選択・回転・移動・リセット</small></summary><div class="section-content">
+            <div id="poseQuality" class="pose-quality"></div>
+            <label class="joint-field"><span>補正する関節</span><select id="joint">${EDITABLE_JOINTS.map((id) => `<option value="${id}">${JOINT_LABELS[id]}</option>`).join("")}</select></label>
+            <fieldset class="axis-group"><legend>回転 XYZ（角度）</legend><div class="joint-axes">${["X", "Y", "Z"].map((axis) => `<label><span class="axis-name">${axis}</span><input id="jointR${axis}" aria-label="回転 ${axis}" type="range" min="-90" max="90" value="0"/><output id="jointR${axis}Out">0°</output></label>`).join("")}</div></fieldset>
+            <fieldset class="axis-group"><legend>移動 XYZ（モデル単位）</legend><div class="joint-axes">${["X", "Y", "Z"].map((axis) => `<label><span class="axis-name">${axis}</span><input id="jointT${axis}" aria-label="移動 ${axis}" type="range" min="-0.15" max="0.15" step="0.01" value="0"/><output id="jointT${axis}Out">0.00</output></label>`).join("")}</div></fieldset>
+            <div class="edit-actions"><button id="resetJoint">選択関節を戻す</button><button id="resetPose">回転・移動を全て戻す</button><button id="resetAll">体型を含む全補正を戻す</button></div>
+            <p>紫の関節をクリックして選択し、回転または親座標系での移動を調整してください。</p>
+          </div></details>
         </div>
-        <div class="divider"></div>
-        <div class="step"><span>02</span><div><b>3DGS化</b><small>素体のポーズ確認後に実行</small></div></div>
-        <label class="field"><span>最大Splat数 <output id="countOut">120,000</output></span><input id="count" type="range" min="10000" max="500000" step="10000" value="120000"/></label>
-        <label class="field"><span>奥行きの強さ <output id="depthOut">100%</output></span><input id="depth" type="range" min="20" max="180" value="100"/></label>
-        <button class="primary" id="generate" disabled><span>2</span> 確認したポーズで3DGS化</button>
+        <details class="control-section step-two"><summary><span class="step-number">02</span><span><b>3DGS化</b><small>素体のポーズ確認後に実行</small></span></summary><div class="section-content">
+          <label class="field"><span>最大Splat数 <output id="countOut">120,000</output></span><input id="count" type="range" min="10000" max="500000" step="10000" value="120000"/></label>
+          <label class="field"><span>奥行きの強さ <output id="depthOut">100%</output></span><input id="depth" type="range" min="20" max="180" value="100"/></label>
+          <button class="primary" id="generate" disabled><span>2</span> 確認したポーズで3DGS化</button>
+        </div></details>
         <p id="status" class="status" role="status">写真を選択してください</p>
       </aside>
       <section class="viewer-card" aria-label="3Dビューアー">
@@ -364,6 +368,7 @@ function clear(): void {
   fileInput.value = "";
   byId("thumbWrap").classList.add("hidden");
   byId("poseControls").classList.add("hidden");
+  document.querySelector<HTMLDetailsElement>(".photo-section")!.open = true;
   byId("exports").classList.add("hidden");
   estimate.disabled = true;
   generate.disabled = true;
@@ -390,6 +395,9 @@ estimate.addEventListener("click", async () => {
     syncJointControls();
     byId("empty").classList.add("hidden");
     byId("poseControls").classList.remove("hidden");
+    document.querySelector<HTMLDetailsElement>(".photo-section")!.open = false;
+    document.querySelector<HTMLDetailsElement>(".body-section")!.open = false;
+    document.querySelector<HTMLDetailsElement>(".joint-editor")!.open = true;
     byId("stageLabel").textContent = "STEP 1 · 姿勢付き素体GLB";
     byId("modes").classList.add("hidden");
     byId("views").classList.remove("hidden");
