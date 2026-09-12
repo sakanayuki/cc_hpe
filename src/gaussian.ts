@@ -284,3 +284,11 @@ export function imageToCloud(
     layer,
   };
 }
+
+/** Formats the estimated 68-byte-per-vertex binary PLY payload without hiding small clouds. */
+export function formatEstimatedPlySize(count: number): string {
+  const bytes = count * 68;
+  return bytes < 1024 * 1024
+    ? `${Math.max(1, Math.ceil(bytes / 1024))} KiB`
+    : `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+}
