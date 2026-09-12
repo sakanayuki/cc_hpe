@@ -8,6 +8,7 @@ import { getContainRect, mapLandmarkToContain } from "./pose-overlay";
 import {
   BodyViewer,
   EDITABLE_JOINTS,
+  isCompleteBodyRetarget,
   JOINT_LABELS,
   type JointId,
 } from "./body-viewer";
@@ -397,11 +398,14 @@ estimate.addEventListener("click", async () => {
     ).length;
     byId("poseQuality").textContent =
       `33関節を推定 · 高信頼 ${visible}/33 · 紫の骨格を写真上に表示`;
-    generate.disabled = application.appliedBones === 0;
+    const completeRetarget = isCompleteBodyRetarget(application);
+    generate.disabled = !completeRetarget;
     const result = `姿勢推定成功 · GLB適用 ${application.appliedBones}ボーン · 欠落 ${application.missingBones.length}ボーン`;
-    status.textContent = application.missingBones.length
-      ? `${result}（${application.missingBones.join("、")}）`
-      : `${result} · 素体を回転して姿勢を確認・補正してください`;
+    status.textContent = !completeRetarget
+      ? `${result} · 必須ボーンへの姿勢適用が未完了です`
+      : application.missingBones.length
+        ? `${result}（${application.missingBones.join("、")}）`
+        : `${result} · 素体を回転して姿勢を確認・補正してください`;
   } catch (error) {
     pose = undefined;
     status.textContent =

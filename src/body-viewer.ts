@@ -48,6 +48,14 @@ export type RetargetReport = {
   missingBones: string[];
   skippedBones: string[];
 };
+
+/** GLTFLoader sanitizes ':' from node names; restore the authored Mixamo names. */
+export function restoreMixamoBoneNames(model: THREE.Object3D) {
+  model.traverse((node) => {
+    if ((node as THREE.Bone).isBone && /^mixamorig(?!:)/.test(node.name))
+      node.name = node.name.replace(/^mixamorig/, "mixamorig:");
+  });
+}
 export type RestBone = {
   localPosition: THREE.Vector3;
   localQuaternion: THREE.Quaternion;
@@ -299,6 +307,18 @@ export const RULES: readonly Rule[] = [
   },
   { id: "rightFoot", bone: "mixamorig:RightFoot", from: [28], to: [32] },
 ];
+
+/** STEP 1 requires every body rule to have been applied successfully. */
+export function isCompleteBodyRetarget(report: RetargetReport) {
+  return (
+    report.appliedBones >= RULES.length &&
+    RULES.every(
+      ({ bone }) =>
+        !report.missingBones.includes(bone) &&
+        !report.skippedBones.includes(bone),
+    )
+  );
+}
 
 type FingerRule = {
   side: HandSide;
@@ -862,6 +882,7 @@ export class BodyViewer {
       `${import.meta.env.BASE_URL}runtime/body.glb`,
     );
     this.model = gltf.scene;
+    restoreMixamoBoneNames(this.model);
     this.scene.add(this.model);
     this.rest = captureRestPose(this.model);
   }
