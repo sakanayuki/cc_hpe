@@ -360,6 +360,8 @@ export const EDITABLE_JOINTS = RULES.map((r) => r.id);
 
 const MIN_VISIBILITY = 0.45;
 const EPSILON = 1e-6;
+/** Mixamo's head bind pose needs this local-space offset after pose estimation. */
+export const HEAD_BIND_POSE_X_CORRECTION = Math.PI / 2;
 
 export type FrontAlignment = {
   target: Point;
@@ -896,6 +898,35 @@ export function retargetSkeleton(
             .setFromUnitVectors(saved.worldDirection, fallback)
             .multiply(saved.worldQuaternion)
             .normalize();
+      }
+    } else if (rule.id === "head" && usable([...rule.from, ...rule.to], pose)) {
+      const target = poseDirection(rule.from, rule.to, pose, depthScale);
+      if (
+        target.lengthSq() > EPSILON &&
+        saved.worldDirection.lengthSq() > EPSILON
+      ) {
+        const estimatedWorld = new THREE.Quaternion()
+          .setFromUnitVectors(saved.worldDirection, target)
+          .multiply(saved.worldQuaternion)
+          .normalize();
+        const parentWorld =
+          bone.parent?.getWorldQuaternion(new THREE.Quaternion()) ??
+          new THREE.Quaternion();
+        // Convert the estimate to local space before adding the Mixamo bind
+        // offset. This keeps the neck's world rotation from being applied a
+        // second time and makes the fixed offset part of the rebuilt base pose.
+        bone.quaternion
+          .copy(parentWorld.invert().multiply(estimatedWorld))
+          .multiply(
+            new THREE.Quaternion().setFromAxisAngle(
+              new THREE.Vector3(1, 0, 0),
+              HEAD_BIND_POSE_X_CORRECTION,
+            ),
+          )
+          .normalize();
+        model.updateWorldMatrix(true, true);
+        report.appliedBones++;
+        continue;
       }
     } else if (usable([...rule.from, ...rule.to], pose)) {
       const target = poseDirection(rule.from, rule.to, pose, depthScale);

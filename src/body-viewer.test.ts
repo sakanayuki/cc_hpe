@@ -85,6 +85,9 @@ describe("GLB pose retargeting", () => {
     const spine = add(hips, "mixamorig:Spine", new THREE.Vector3(0, 1, 0));
     const spine1 = add(spine, "mixamorig:Spine1", new THREE.Vector3(0, 1, 0));
     const chest = add(spine1, "mixamorig:Spine2", new THREE.Vector3(0, 1, 0));
+    const neck = add(chest, "mixamorig:Neck", new THREE.Vector3(0, 0.4, 0));
+    const head = add(neck, "mixamorig:Head", new THREE.Vector3(0, 0.3, 0));
+    add(head, "mixamorig:HeadTop_End", new THREE.Vector3(0, 0.4, 0));
     const leftShoulder = add(
       chest,
       "mixamorig:LeftShoulder",
@@ -110,7 +113,16 @@ describe("GLB pose retargeting", () => {
     );
     add(rightLeg, "mixamorig:RightLeg", new THREE.Vector3(0, -1, 0));
     hips.updateWorldMatrix(true, true);
-    return { hips, chest, leftShoulder, rightShoulder, leftLeg, rightLeg };
+    return {
+      hips,
+      chest,
+      neck,
+      head,
+      leftShoulder,
+      rightShoulder,
+      leftLeg,
+      rightLeg,
+    };
   };
 
   const frontalPose = (depthOffset = 0) => {
@@ -124,6 +136,7 @@ describe("GLB pose retargeting", () => {
     put(12, 0.7, 2, depthOffset);
     put(7, -0.1, 3, 0);
     put(8, 0.1, 3, 0);
+    put(0, 0, 3, 1);
     put(25, -0.35, -1, depthOffset);
     put(26, 0.35, -1, -depthOffset);
     return p;
@@ -165,6 +178,33 @@ describe("GLB pose retargeting", () => {
     retargetSkeleton(rig.hips, frontalPose(0.01), rest);
     const after = rig.hips.getWorldQuaternion(new THREE.Quaternion());
     expect(Math.abs(before.dot(after))).toBeGreaterThan(0.999);
+  });
+
+  it("applies the Mixamo head offset once and composes manual correction onto it", () => {
+    const rig = makeFrontFacingRig();
+    const rest = captureRestPose(rig.hips);
+    const p = frontalPose();
+
+    retargetSkeleton(rig.hips, p, rest);
+    const estimatedHead = rig.head.quaternion.clone();
+    // Mixamo's authored head-forward axis is local -Z; the camera is on +Z.
+    const headFront = new THREE.Vector3(0, 0, -1).applyQuaternion(
+      rig.head.getWorldQuaternion(new THREE.Quaternion()),
+    );
+    expect(headFront.z).toBeGreaterThan(0.99);
+
+    retargetSkeleton(rig.hips, p, rest);
+    expect(Math.abs(rig.head.quaternion.dot(estimatedHead))).toBeCloseTo(1, 5);
+
+    const manual = new THREE.Euler(0, Math.PI / 6, 0, "XYZ");
+    applyJointCorrection(rig.head, rig.head.position.clone(), estimatedHead, {
+      rotation: manual,
+      translation: new THREE.Vector3(),
+    });
+    const expected = estimatedHead
+      .clone()
+      .multiply(new THREE.Quaternion().setFromEuler(manual));
+    expect(Math.abs(rig.head.quaternion.dot(expected))).toBeCloseTo(1, 5);
   });
 
   it("uses 3D world-landmark depth instead of flattened image coordinates", () => {
