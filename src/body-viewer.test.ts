@@ -8,6 +8,7 @@ import {
   fitFrontProjection,
   landmarkToModel,
   poseDirection,
+  preservingCameraState,
   retargetSkeleton,
 } from "./body-viewer";
 import type { PoseGuidance } from "./pose";
@@ -26,6 +27,48 @@ const pose = {
   maskWidth: 1,
   maskHeight: 1,
 } satisfies PoseGuidance;
+
+describe("camera state preservation", () => {
+  it.each([
+    "depth scale",
+    "body width",
+    "body height",
+    "limb lengths",
+    "joint correction",
+    "joint reset",
+    "pose reset",
+  ])("keeps arbitrary orbit/pan/zoom state during %s updates", () => {
+    const camera = new THREE.PerspectiveCamera(36, 1.7, 0.01, 100);
+    camera.position.set(2.4, -0.7, 4.1);
+    camera.quaternion.setFromEuler(new THREE.Euler(0.31, -0.46, 0.12));
+    camera.zoom = 2.35;
+    camera.updateProjectionMatrix();
+    const controls = {
+      target: new THREE.Vector3(-0.8, 1.3, 0.45),
+      update() {},
+    };
+    const expected = {
+      position: camera.position.clone(),
+      quaternion: camera.quaternion.clone(),
+      zoom: camera.zoom,
+      target: controls.target.clone(),
+    };
+
+    preservingCameraState(camera, controls, () => {
+      // Model recalculation must remain safe even if a future implementation
+      // temporarily uses camera-dependent image alignment internally.
+      camera.position.set(99, 98, 97);
+      camera.quaternion.identity();
+      camera.zoom = 0.25;
+      controls.target.set(-9, -8, -7);
+    });
+
+    expect(camera.position.toArray()).toEqual(expected.position.toArray());
+    expect(camera.quaternion.toArray()).toEqual(expected.quaternion.toArray());
+    expect(camera.zoom).toBe(expected.zoom);
+    expect(controls.target.toArray()).toEqual(expected.target.toArray());
+  });
+});
 
 describe("GLB pose retargeting", () => {
   const makeFrontFacingRig = () => {
