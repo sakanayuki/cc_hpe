@@ -221,6 +221,47 @@ describe("GLB pose retargeting", () => {
     expect(hips.position.distanceTo(onceP)).toBeCloseTo(0);
   });
 
+  it("switches only the hips local facing by 180 degrees without accumulating", () => {
+    const rig = makeFrontFacingRig();
+    const rest = captureRestPose(rig.hips);
+    const p = frontalPose();
+
+    retargetSkeleton(rig.hips, p, rest, 1, "front");
+    const frontHips = rig.hips.quaternion.clone();
+    const frontSpine = rig.hips
+      .getObjectByName("mixamorig:Spine")!
+      .quaternion.clone();
+    const frontSpine1 = rig.hips
+      .getObjectByName("mixamorig:Spine1")!
+      .quaternion.clone();
+    const frontChest = rig.chest.quaternion.clone();
+
+    retargetSkeleton(rig.hips, p, rest, 1, "back");
+    const backHips = rig.hips.quaternion.clone();
+    const angularDifference =
+      2 *
+      Math.acos(
+        THREE.MathUtils.clamp(Math.abs(frontHips.dot(backHips)), -1, 1),
+      );
+    expect(angularDifference).toBeCloseTo(Math.PI, 5);
+    expect(
+      Math.abs(
+        rig.hips.getObjectByName("mixamorig:Spine")!.quaternion.dot(frontSpine),
+      ),
+    ).toBeCloseTo(1, 5);
+    expect(
+      Math.abs(
+        rig.hips
+          .getObjectByName("mixamorig:Spine1")!
+          .quaternion.dot(frontSpine1),
+      ),
+    ).toBeCloseTo(1, 5);
+    expect(Math.abs(rig.chest.quaternion.dot(frontChest))).toBeCloseTo(1, 5);
+
+    retargetSkeleton(rig.hips, p, rest, 1, "back");
+    expect(Math.abs(rig.hips.quaternion.dot(backHips))).toBeCloseTo(1, 5);
+  });
+
   it("distributes simultaneous hip yaw, torso lean, and shoulder roll through the real spine chain", () => {
     const hips = new THREE.Bone();
     hips.name = "mixamorig:Hips";
