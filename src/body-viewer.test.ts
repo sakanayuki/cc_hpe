@@ -6,6 +6,7 @@ import {
   alignRootToImagePelvis,
   captureRestPose,
   fitFrontProjection,
+  HEAD_BIND_POSE_X_CORRECTION,
   landmarkToModel,
   poseDirection,
   preservingCameraState,
@@ -180,31 +181,60 @@ describe("GLB pose retargeting", () => {
     expect(Math.abs(before.dot(after))).toBeGreaterThan(0.999);
   });
 
-  it("applies the Mixamo head offset once and composes manual correction onto it", () => {
+  it("applies the fixed local X-axis -90° head correction to a front-facing pose", () => {
     const rig = makeFrontFacingRig();
     const rest = captureRestPose(rig.hips);
     const p = frontalPose();
 
     retargetSkeleton(rig.hips, p, rest);
-    const estimatedHead = rig.head.quaternion.clone();
-    // Mixamo's authored head-forward axis is local -Z; the camera is on +Z.
-    const headFront = new THREE.Vector3(0, 0, -1).applyQuaternion(
-      rig.head.getWorldQuaternion(new THREE.Quaternion()),
+    const saved = rest.get(rig.head.name)!;
+    const target = poseDirection([7, 8], [0], p);
+    const estimatedWorld = new THREE.Quaternion()
+      .setFromUnitVectors(saved.worldDirection, target)
+      .multiply(saved.worldQuaternion)
+      .normalize();
+    const estimatedLocal = rig.neck
+      .getWorldQuaternion(new THREE.Quaternion())
+      .invert()
+      .multiply(estimatedWorld);
+    const expected = estimatedLocal.multiply(
+      new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(1, 0, 0),
+        -Math.PI / 2,
+      ),
     );
-    expect(headFront.z).toBeGreaterThan(0.99);
+
+    expect(HEAD_BIND_POSE_X_CORRECTION).toBe(-Math.PI / 2);
+    expect(rig.head.quaternion.angleTo(expected)).toBeCloseTo(0, 5);
+  });
+
+  it("rebuilds the -90° head correction from rest across retarget, edit, and reset", () => {
+    const rig = makeFrontFacingRig();
+    const rest = captureRestPose(rig.hips);
+    const p = frontalPose();
 
     retargetSkeleton(rig.hips, p, rest);
-    expect(Math.abs(rig.head.quaternion.dot(estimatedHead))).toBeCloseTo(1, 5);
+    const rebuiltHead = rig.head.quaternion.clone();
+
+    retargetSkeleton(rig.hips, p, rest);
+    expect(rig.head.quaternion.angleTo(rebuiltHead)).toBeCloseTo(0, 5);
 
     const manual = new THREE.Euler(0, Math.PI / 6, 0, "XYZ");
-    applyJointCorrection(rig.head, rig.head.position.clone(), estimatedHead, {
+    const basePosition = rig.head.position.clone();
+    applyJointCorrection(rig.head, basePosition, rebuiltHead, {
       rotation: manual,
       translation: new THREE.Vector3(),
     });
-    const expected = estimatedHead
+    const manuallyCorrected = rebuiltHead
       .clone()
       .multiply(new THREE.Quaternion().setFromEuler(manual));
-    expect(Math.abs(rig.head.quaternion.dot(expected))).toBeCloseTo(1, 5);
+    expect(rig.head.quaternion.angleTo(manuallyCorrected)).toBeCloseTo(0, 5);
+
+    applyJointCorrection(rig.head, basePosition, rebuiltHead);
+    expect(rig.head.quaternion.angleTo(rebuiltHead)).toBeCloseTo(0, 5);
+
+    retargetSkeleton(rig.hips, p, rest);
+    expect(rig.head.quaternion.angleTo(rebuiltHead)).toBeCloseTo(0, 5);
   });
 
   it("uses 3D world-landmark depth instead of flattened image coordinates", () => {
