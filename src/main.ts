@@ -18,6 +18,13 @@ import {
   type JointId,
 } from "./body-viewer";
 import { initializeTheme, themeButtonText, THEME_COLORS } from "./theme";
+import {
+  browserEnvironment,
+  copyDiagnostics,
+  DiagnosticLog,
+} from "./diagnostics";
+
+declare const __APP_VERSION__: string;
 
 const theme = initializeTheme();
 
@@ -62,6 +69,7 @@ app.innerHTML = `
         <div class="toolbar"><div><b id="stageLabel">STEP 1 · 素体GLBプレビュー</b><div class="segmented" id="views"><button data-view="front">正面</button><button data-view="side">側面</button><button data-view="back">背面</button><button data-view="top">上面</button></div><div class="segmented hidden" id="modes" role="group" aria-label="表示情報"><button class="active" data-mode="color">カラー</button><button data-mode="depth">深度</button><button data-mode="opacity">不透明度</button><button data-mode="confidence">信頼度</button><button data-mode="source">生成元</button></div><div id="filters" class="viewer-filters hidden"><label>信頼度 <input id="minConfidence" type="range" min="0" max="100" value="0"/><output id="minConfidenceOut">0%</output></label><select id="layerFilter" aria-label="生成元フィルター"><option value="-1">全生成元</option><option value="0">観測面のみ</option><option value="1">推定背面のみ</option><option value="2">補間領域のみ</option></select></div></div><button id="reset" class="icon-button" title="視点をリセット">↻</button></div>
         <div id="viewer" class="viewer"><img id="referenceImage" class="reference-image hidden" alt="比較用の元画像"/><div id="empty" class="empty"><div class="orb"><span></span></div><strong>姿勢付き素体プレビュー</strong><p>写真を選びSTEP 1を実行すると、<br>推定ポーズを適用したGLB素体を表示します</p></div><div id="angle" class="angle hidden">正面以外では画像比較できません · <b>0°</b></div></div>
         <footer class="viewer-footer"><span><kbd>ドラッグ</kbd> 回転</span><span><kbd>ホイール</kbd> ズーム</span><span id="fps">-- FPS</span><span id="stats">0 splats</span></footer>
+        <details class="diagnostic-panel"><summary>診断ログ</summary><div class="diagnostic-actions"><button id="copyLog" type="button">コピー</button><button id="clearLog" type="button">クリア</button></div><pre id="diagnosticLog" tabindex="0" aria-label="診断ログ"></pre></details>
       </section>
     </section>
     <section id="exports" class="exports hidden"><div><p class="eyebrow">EXPORT</p><h2>生成結果を保存</h2><p>デバッグ属性はPLYに保持されます。SPLATでは深度と信頼度が失われます。</p></div><div class="export-buttons"><button id="ply">↓ <span><b>PLY</b><small>SuperSplat互換</small></span></button><button id="splat">↓ <span><b>SPLAT</b><small>32-byte形式</small></span></button><button id="spz">↓ <span><b>SPZ</b><small>Niantic v3</small></span></button></div></section>
@@ -75,6 +83,20 @@ const estimate = byId<HTMLButtonElement>("estimate");
 const count = byId<HTMLInputElement>("count");
 const depth = byId<HTMLInputElement>("depth");
 const status = byId("status");
+const diagnosticLog = new DiagnosticLog(100);
+const renderDiagnostics = () => {
+  byId("diagnosticLog").textContent = diagnosticLog.format(
+    browserEnvironment(__APP_VERSION__),
+  );
+};
+byId("copyLog").addEventListener("click", async () => {
+  await copyDiagnostics(diagnosticLog, browserEnvironment(__APP_VERSION__));
+});
+byId("clearLog").addEventListener("click", () => {
+  diagnosticLog.clear();
+  renderDiagnostics();
+});
+renderDiagnostics();
 const minConfidence = byId<HTMLInputElement>("minConfidence"),
   layerFilter = byId<HTMLSelectElement>("layerFilter");
 const referenceImage = byId<HTMLImageElement>("referenceImage"),
@@ -459,6 +481,7 @@ generate.addEventListener("click", async () => {
   const startedAt = performance.now();
   status.textContent = "確認した骨格と人物領域から3DGS化しています…";
   await new Promise(requestAnimationFrame);
+  let intermediate: import("./gaussian").CloudDiagnostics | undefined;
   try {
     const max = 1400,
       ratio = Math.min(
@@ -480,6 +503,9 @@ generate.addEventListener("click", async () => {
         alphaThreshold: 8,
       },
       pose,
+      (value) => {
+        intermediate = structuredClone(value);
+      },
     );
     if (!Number.isInteger(cloud.count) || cloud.count <= 0)
       throw new Error("生成されたGaussian cloudの点数が不正です。");
@@ -495,14 +521,59 @@ generate.addEventListener("click", async () => {
     byId("exports").classList.remove("hidden");
     byId("stats").textContent = `${cloud.count.toLocaleString("ja-JP")} splats`;
     const seconds = (performance.now() - startedAt) / 1000;
+    diagnosticLog.add(
+      cloud.count <= Number(count.value) * 0.15 ? "warning" : "info",
+      "step2.completed",
+      {
+        ...(intermediate ? flattenCloudDiagnostics(intermediate) : {}),
+        seconds,
+      },
+    );
+    renderDiagnostics();
     status.textContent = `3DGS化完了 · ${seconds.toFixed(1)}秒 · ${cloud.count.toLocaleString("ja-JP")}点 · PLY推定${formatEstimatedPlySize(cloud.count)}`;
   } catch (error) {
+    diagnosticLog.add("error", "step2.failed", {
+      ...(intermediate ? flattenCloudDiagnostics(intermediate) : {}),
+      message: error instanceof Error ? error.message : "推定に失敗しました",
+    });
+    renderDiagnostics();
     status.textContent =
       error instanceof Error ? error.message : "推定に失敗しました";
   } finally {
     generate.disabled = false;
   }
 });
+
+function flattenCloudDiagnostics(value: import("./gaussian").CloudDiagnostics) {
+  return {
+    imageResolution: `${value.imageWidth}x${value.imageHeight}`,
+    requestedMaxPoints: value.requestedMaxPoints,
+    personMaskPixels: value.personMaskPixels,
+    glbMaskPixels: value.glbMaskPixels,
+    intersectionPixels: value.intersectionPixels,
+    intersectionRate: value.intersectionRate,
+    stride: value.stride,
+    frontBudget: value.frontBudget,
+    rearBudget: value.rearBudget,
+    frontGenerated: value.frontGenerated,
+    rearGenerated: value.rearGenerated,
+    cleanupInvalid: value.cleanupRemoved.invalid,
+    cleanupDepthOutlier: value.cleanupRemoved.depthOutlier,
+    cleanupDuplicate: value.cleanupRemoved.duplicate,
+    cleanupBudget: value.cleanupRemoved.budget,
+    finalPoints: value.finalPoints,
+    frontDepthValid: value.frontDepth.validPixels,
+    frontDepthMin: value.frontDepth.min,
+    frontDepthMax: value.frontDepth.max,
+    backDepthValid: value.backDepth.validPixels,
+    backDepthMin: value.backDepth.min,
+    backDepthMax: value.backDepth.max,
+    cameraPosition: value.camera.position.join(","),
+    cameraTarget: value.camera.target.join(","),
+    cameraFrontAngle: value.camera.frontAngleDegrees,
+    projectionMatrixFinite: value.camera.projectionMatrixFinite,
+  };
+}
 
 byId("ply").addEventListener(
   "click",

@@ -547,6 +547,35 @@ main {
   margin-left: auto;
   color: var(--text-muted);
 }
+.diagnostic-panel {
+  border-top: 1px solid var(--line);
+  padding: 10px 15px;
+  font-size: 11px;
+}
+.diagnostic-panel summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+.diagnostic-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 8px 0;
+}
+.diagnostic-actions button {
+  padding: 5px 10px;
+}
+.diagnostic-panel pre {
+  user-select: text;
+  white-space: pre-wrap;
+  overflow: auto;
+  max-height: 220px;
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+}
 kbd {
   background: var(--kbd-bg);
   padding: 3px 5px;

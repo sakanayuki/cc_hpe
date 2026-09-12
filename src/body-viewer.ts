@@ -1460,6 +1460,19 @@ export class BodyViewer {
       mask,
       normal,
       inverseProjectionView: new Float32Array(inverseProjectionView.elements),
+      camera: {
+        position: camera.position.toArray() as [number, number, number],
+        target: this.controls.target.toArray() as [number, number, number],
+        frontAngleDegrees:
+          camera.position
+            .clone()
+            .sub(this.controls.target)
+            .angleTo(new THREE.Vector3(0, 0, 1)) *
+          (180 / Math.PI),
+        projectionMatrixFinite: camera.projectionMatrix.elements.every(
+          Number.isFinite,
+        ),
+      },
     };
   }
   setView(view: "front" | "side" | "back" | "top") {
