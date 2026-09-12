@@ -34,6 +34,15 @@ describe("STEP 1 responsive layout", () => {
     expect(css).toContain("height: clamp(120px, 34dvh, 210px)");
   });
 
+  it("keeps the labeled theme switch inside the mobile header", () => {
+    expect(main).toContain('id="themeToggle"');
+    expect(main).toContain('class="header-actions"');
+    expect(css).toMatch(
+      /@media \(max-width: 800px\)[\s\S]*?\.theme-toggle \.theme-label \{[\s\S]*?display: none;/,
+    );
+    expect(css).toMatch(/\.header-actions \{[\s\S]*?min-width: 0;/);
+  });
+
   it.each([
     [320, 568],
     [375, 667],
