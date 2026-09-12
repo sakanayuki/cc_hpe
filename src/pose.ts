@@ -1,12 +1,31 @@
 import {
   FilesetResolver,
+  HandLandmarker,
   PoseLandmarker,
+  type Category,
   type NormalizedLandmark,
 } from "@mediapipe/tasks-vision";
+
+export type HandSide = "left" | "right";
+export type HandLandmark = NormalizedLandmark & {
+  /** Hand Landmarker does not expose per-point visibility; this is its hand score. */
+  visibility: number;
+  confidence: number;
+};
+export interface HandPose {
+  /** Exactly 21 MediaPipe hand landmarks, in image coordinates. */
+  landmarks: HandLandmark[];
+  /** Exactly 21 landmarks in the Hand Landmarker's metric world coordinates. */
+  worldLandmarks: HandLandmark[];
+  handedness: HandSide;
+  confidence: number;
+}
+export type HandsGuidance = Partial<Record<HandSide, HandPose>>;
 
 export interface PoseGuidance {
   landmarks: NormalizedLandmark[];
   worldLandmarks: NormalizedLandmark[];
+  hands?: HandsGuidance;
   mask: Float32Array;
   maskWidth: number;
   maskHeight: number;
@@ -30,6 +49,10 @@ export interface RigSurfaceBuffer {
 }
 
 let instance: Promise<PoseLandmarker> | undefined;
+let handInstance: Promise<HandLandmarker> | undefined;
+
+export const MIN_HAND_CONFIDENCE = 0.65;
+export const MIN_HAND_IMAGE_DIAGONAL = 0.055;
 
 function landmarker(): Promise<PoseLandmarker> {
   instance ??= (async () => {
@@ -50,10 +73,102 @@ function landmarker(): Promise<PoseLandmarker> {
   return instance;
 }
 
+function handLandmarker(): Promise<HandLandmarker> {
+  handInstance ??= (async () => {
+    const base = import.meta.env.BASE_URL;
+    const wasm = await FilesetResolver.forVisionTasks(`${base}runtime/wasm`);
+    return HandLandmarker.createFromOptions(wasm, {
+      baseOptions: {
+        modelAssetPath: `${base}runtime/models/hand_landmarker.task`,
+        delegate: "GPU",
+      },
+      runningMode: "IMAGE",
+      numHands: 2,
+      minHandDetectionConfidence: MIN_HAND_CONFIDENCE,
+      minHandPresenceConfidence: MIN_HAND_CONFIDENCE,
+    });
+  })();
+  return handInstance;
+}
+
+type RawHand = {
+  landmarks: NormalizedLandmark[];
+  worldLandmarks: NormalizedLandmark[];
+  handedness: Category[];
+};
+
+/** Filters and anatomically associates detections rather than trusting labels alone. */
+export function associateHands(
+  detections: RawHand[],
+  poseLandmarks: NormalizedLandmark[],
+  imageMirrored = false,
+): HandsGuidance {
+  const candidates = detections.flatMap((hand, sourceIndex) => {
+    if (hand.landmarks.length !== 21 || hand.worldLandmarks.length !== 21)
+      return [];
+    const xs = hand.landmarks.map((p) => p.x);
+    const ys = hand.landmarks.map((p) => p.y);
+    const imageDiagonal = Math.hypot(
+      Math.max(...xs) - Math.min(...xs),
+      Math.max(...ys) - Math.min(...ys),
+    );
+    const category = hand.handedness[0];
+    const confidence = category?.score ?? 0;
+    if (
+      confidence < MIN_HAND_CONFIDENCE ||
+      imageDiagonal < MIN_HAND_IMAGE_DIAGONAL
+    )
+      return [];
+    let label = category.categoryName.toLowerCase() as HandSide;
+    // MediaPipe's label convention assumes a mirrored/selfie image.
+    if (!imageMirrored) label = label === "left" ? "right" : "left";
+    return [{ hand, sourceIndex, confidence, label, imageDiagonal }];
+  });
+  const output: HandsGuidance = {};
+  const used = new Set<number>();
+  for (const [side, wristIndex] of [
+    ["left", 15],
+    ["right", 16],
+  ] as const) {
+    const wrist = poseLandmarks[wristIndex];
+    if (!wrist) continue;
+    let best:
+      | ((typeof candidates)[number] & { distance: number; cost: number })
+      | undefined;
+    for (const candidate of candidates) {
+      if (used.has(candidate.sourceIndex)) continue;
+      const handWrist = candidate.hand.landmarks[0];
+      const distance = Math.hypot(handWrist.x - wrist.x, handWrist.y - wrist.y);
+      // Distance is authoritative; handedness resolves crossings/near ties.
+      const cost = distance + (candidate.label === side ? 0 : 0.08);
+      if (!best || cost < best.cost) best = { ...candidate, distance, cost };
+    }
+    if (!best || best.distance > Math.max(0.12, best.imageDiagonal * 1.5))
+      continue;
+    used.add(best.sourceIndex);
+    const enrich = (p: NormalizedLandmark): HandLandmark => ({
+      ...p,
+      visibility: best!.confidence,
+      confidence: best!.confidence,
+    });
+    output[side] = {
+      landmarks: best.hand.landmarks.map(enrich),
+      worldLandmarks: best.hand.worldLandmarks.map(enrich),
+      handedness: side,
+      confidence: best.confidence,
+    };
+  }
+  return output;
+}
+
 export async function detectSinglePerson(
   image: HTMLImageElement,
+  imageMirrored = false,
 ): Promise<PoseGuidance> {
-  const result = (await landmarker()).detect(image);
+  const [result, handResult] = await Promise.all([
+    landmarker().then((detector) => detector.detect(image)),
+    handLandmarker().then((detector) => detector.detect(image)),
+  ]);
   if (!result.landmarks.length)
     throw new Error(
       "人物を検出できませんでした。全身または上半身が見える写真を選択してください。",
@@ -69,6 +184,15 @@ export async function detectSinglePerson(
   const guidance = {
     landmarks: result.landmarks[0].map((point) => ({ ...point })),
     worldLandmarks: result.worldLandmarks[0].map((point) => ({ ...point })),
+    hands: associateHands(
+      handResult.landmarks.map((landmarks, index) => ({
+        landmarks,
+        worldLandmarks: handResult.worldLandmarks[index] ?? [],
+        handedness: handResult.handedness[index] ?? [],
+      })),
+      result.landmarks[0],
+      imageMirrored,
+    ),
     mask: new Float32Array(segmentation.getAsFloat32Array()),
     maskWidth: segmentation.width,
     maskHeight: segmentation.height,

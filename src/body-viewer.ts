@@ -1,7 +1,13 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { PoseGuidance, RigSurfaceBuffer } from "./pose";
+import {
+  MIN_HAND_CONFIDENCE,
+  type HandPose,
+  type HandSide,
+  type PoseGuidance,
+  type RigSurfaceBuffer,
+} from "./pose";
 import {
   getContainRect,
   mapLandmarkToContain,
@@ -293,6 +299,42 @@ export const RULES: readonly Rule[] = [
   },
   { id: "rightFoot", bone: "mixamorig:RightFoot", from: [28], to: [32] },
 ];
+
+type FingerRule = {
+  side: HandSide;
+  bone: string;
+  from: number;
+  to: number;
+  /** Share the last measured distal bend with an otherwise unobserved tip bone. */
+  distalBlend?: number;
+};
+
+const FINGER_LANDMARKS = {
+  Thumb: [1, 2, 3, 4],
+  Index: [5, 6, 7, 8],
+  Middle: [9, 10, 11, 12],
+  Ring: [13, 14, 15, 16],
+  Pinky: [17, 18, 19, 20],
+} as const;
+
+/** Mixamo's four phalange bones mapped onto MediaPipe's observed segments. */
+export const HAND_BONE_RULES: readonly FingerRule[] = (
+  ["Left", "Right"] as const
+).flatMap((mixamoSide) =>
+  Object.entries(FINGER_LANDMARKS).flatMap(([finger, points]) => {
+    const side = mixamoSide.toLowerCase() as HandSide;
+    return [1, 2, 3, 4].map(
+      (number): FingerRule => ({
+        side,
+        bone: `mixamorig:${mixamoSide}Hand${finger}${number}`,
+        from: points[Math.min(number - 1, 2)],
+        to: points[Math.min(number, 3)],
+        // Bone 3 and the extra terminal bone share the final observed flexion.
+        distalBlend: number === 3 ? 0.7 : number === 4 ? 1 : undefined,
+      }),
+    );
+  }),
+);
 export const EDITABLE_JOINTS = RULES.map((r) => r.id);
 
 const MIN_VISIBILITY = 0.45;
@@ -470,7 +512,63 @@ export function captureRestPose(model: THREE.Object3D) {
       worldDirection: end.clone().sub(start).normalize(),
     });
   }
+  for (const rule of HAND_BONE_RULES) {
+    const bone = model.getObjectByName(rule.bone);
+    if (!bone) continue;
+    const child = bone.children.find((node) => (node as THREE.Bone).isBone);
+    const start = bone.getWorldPosition(new THREE.Vector3());
+    let end = child?.getWorldPosition(new THREE.Vector3()) ?? start.clone();
+    if (!child) {
+      const parentDirection =
+        bone.parent && result.get(bone.parent.name)?.worldDirection;
+      if (parentDirection) end = start.clone().add(parentDirection);
+    }
+    result.set(rule.bone, {
+      localPosition: bone.position.clone(),
+      localQuaternion: bone.quaternion.clone(),
+      worldQuaternion: bone.getWorldQuaternion(new THREE.Quaternion()),
+      start,
+      end,
+      worldDirection: end.clone().sub(start).normalize(),
+    });
+  }
   return result;
+}
+
+function handDirection(
+  hand: HandPose,
+  from: number,
+  to: number,
+  depthScale: number,
+) {
+  const a = hand.worldLandmarks[from];
+  const b = hand.worldLandmarks[to];
+  if (
+    !a ||
+    !b ||
+    (a.visibility ?? 0) < MIN_HAND_CONFIDENCE ||
+    (b.visibility ?? 0) < MIN_HAND_CONFIDENCE
+  )
+    return undefined;
+  const direction = landmarkToModel(b, depthScale).sub(
+    landmarkToModel(a, depthScale),
+  );
+  return direction.lengthSq() > EPSILON ? direction.normalize() : undefined;
+}
+
+function applyWorldDirection(
+  bone: THREE.Object3D,
+  saved: RestBone,
+  target: THREE.Vector3,
+) {
+  const desiredWorld = new THREE.Quaternion()
+    .setFromUnitVectors(saved.worldDirection, target)
+    .multiply(saved.worldQuaternion)
+    .normalize();
+  const parentWorld =
+    bone.parent?.getWorldQuaternion(new THREE.Quaternion()) ??
+    new THREE.Quaternion();
+  bone.quaternion.copy(parentWorld.invert().multiply(desiredWorld)).normalize();
 }
 
 function frameFromUpAndRight(
@@ -556,6 +654,14 @@ export function retargetSkeleton(
       bone.position.copy(saved.localPosition);
     }
   }
+  for (const rule of HAND_BONE_RULES) {
+    const bone = model.getObjectByName(rule.bone);
+    const saved = rest.get(rule.bone);
+    if (bone && saved) {
+      bone.quaternion.copy(saved.localQuaternion);
+      bone.position.copy(saved.localPosition);
+    }
+  }
   model.updateWorldMatrix(true, true);
 
   for (const rule of RULES) {
@@ -582,6 +688,18 @@ export function retargetSkeleton(
           .multiply(saved.worldQuaternion);
         desiredWorld = targetFrame.multiply(restCorrection).normalize();
       }
+    } else if (
+      (rule.id === "leftHand" || rule.id === "rightHand") &&
+      (pose.hands?.[rule.id === "leftHand" ? "left" : "right"]?.confidence ??
+        0) >= MIN_HAND_CONFIDENCE
+    ) {
+      const hand = pose.hands![rule.id === "leftHand" ? "left" : "right"]!;
+      const target = handDirection(hand, 0, 9, depthScale);
+      if (target)
+        desiredWorld = new THREE.Quaternion()
+          .setFromUnitVectors(saved.worldDirection, target)
+          .multiply(saved.worldQuaternion)
+          .normalize();
     } else if (usable([...rule.from, ...rule.to], pose)) {
       const target = poseDirection(rule.from, rule.to, pose, depthScale);
       if (
@@ -608,6 +726,39 @@ export function retargetSkeleton(
     bone.quaternion
       .copy(parentWorld.invert().multiply(desiredWorld))
       .normalize();
+    model.updateWorldMatrix(true, true);
+    report.appliedBones++;
+  }
+  // Finger observations are applied parent-first after the palm. Missing,
+  // mismatched, occluded, and low-confidence hands remain at immutable rest.
+  for (const rule of HAND_BONE_RULES) {
+    const bone = model.getObjectByName(rule.bone);
+    const saved = rest.get(rule.bone);
+    if (!bone || !saved) {
+      report.missingBones.push(rule.bone);
+      continue;
+    }
+    const hand = pose.hands?.[rule.side];
+    if (!hand || hand.confidence < MIN_HAND_CONFIDENCE) {
+      report.skippedBones.push(rule.bone);
+      continue;
+    }
+    let target = handDirection(hand, rule.from, rule.to, depthScale);
+    if (target && rule.distalBlend === 0.7) {
+      const previous = handDirection(
+        hand,
+        rule.from - 1,
+        rule.from,
+        depthScale,
+      );
+      if (previous)
+        target = previous.lerp(target, rule.distalBlend).normalize();
+    }
+    if (!target || saved.worldDirection.lengthSq() <= EPSILON) {
+      report.skippedBones.push(rule.bone);
+      continue;
+    }
+    applyWorldDirection(bone, saved, target);
     model.updateWorldMatrix(true, true);
     report.appliedBones++;
   }
