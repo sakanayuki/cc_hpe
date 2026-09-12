@@ -44,6 +44,10 @@ if (!bodyOnly) {
   }
 }
 
+// fbx2gltf resolves the output directory with realpathSync, so it must exist
+// on a clean checkout even when --body-only skips the model/wasm setup above.
+await mkdir("public/runtime", { recursive: true });
+
 const temporary = await mkdtemp(join(tmpdir(), "posesplat-fbx-"));
 try {
   const fbx = join(temporary, "body.fbx");
