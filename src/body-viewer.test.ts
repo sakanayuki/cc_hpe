@@ -11,6 +11,7 @@ import {
   retargetSkeleton,
 } from "./body-viewer";
 import type { PoseGuidance } from "./pose";
+import { associateHands, type HandPose } from "./pose";
 
 const points = Array.from({ length: 33 }, () => ({
   x: 0,
@@ -73,7 +74,7 @@ describe("GLB pose retargeting", () => {
     add(leftShin, "mixamorig:LeftFoot", new THREE.Vector3(0, -1, 0));
     root.updateWorldMatrix(true, true);
     const rest = captureRestPose(root);
-    const p = structuredClone(pose);
+    const p: PoseGuidance = structuredClone(pose);
     p.worldLandmarks[11] = { x: -1, y: -1, z: 0, visibility: 1 };
     p.worldLandmarks[12] = { x: 1, y: -1, z: 0, visibility: 1 };
     p.worldLandmarks[23] = { x: -0.5, y: 0, z: 0, visibility: 1 };
@@ -211,6 +212,136 @@ describe("GLB pose retargeting", () => {
         5,
       );
     }
+  });
+});
+
+describe("dedicated hand retargeting", () => {
+  const makeHand = (side: "Left" | "Right") => {
+    const forearm = new THREE.Bone();
+    forearm.name = `mixamorig:${side}ForeArm`;
+    const hand = new THREE.Bone();
+    hand.name = `mixamorig:${side}Hand`;
+    hand.position.x = 1;
+    forearm.add(hand);
+    for (const finger of ["Thumb", "Index", "Middle", "Ring", "Pinky"]) {
+      let parent = hand;
+      for (let i = 1; i <= 4; i++) {
+        const bone = new THREE.Bone();
+        bone.name = `mixamorig:${side}Hand${finger}${i}`;
+        bone.position.x = 0.2;
+        parent.add(bone);
+        parent = bone;
+      }
+    }
+    forearm.updateWorldMatrix(true, true);
+    return { root: forearm, hand };
+  };
+  const detectedHand = (
+    side: "left" | "right",
+    confidence = 0.95,
+  ): HandPose => {
+    const landmarks = Array.from({ length: 21 }, (_, i) => ({
+      x: i * 0.01,
+      y: 0,
+      z: 0,
+      visibility: confidence,
+      confidence,
+    }));
+    landmarks[0] = { ...landmarks[0], x: 0, y: 0 };
+    landmarks[9] = { ...landmarks[9], x: 0, y: -1 };
+    landmarks[5] = { ...landmarks[5], x: 0, y: 0 };
+    landmarks[6] = { ...landmarks[6], x: 1, y: 0 };
+    landmarks[7] = { ...landmarks[7], x: 1, y: -1 };
+    landmarks[8] = { ...landmarks[8], x: 2, y: -1 };
+    return {
+      landmarks,
+      worldLandmarks: structuredClone(landmarks),
+      handedness: side,
+      confidence,
+    };
+  };
+
+  it("uses dedicated palm and finger directions", () => {
+    const { root, hand } = makeHand("Left");
+    const rest = captureRestPose(root);
+    const p: PoseGuidance = structuredClone(pose);
+    p.hands = { left: detectedHand("left") };
+    retargetSkeleton(root, p, rest);
+    const palmDirection = hand.children[0]
+      .getWorldPosition(new THREE.Vector3())
+      .sub(hand.getWorldPosition(new THREE.Vector3()))
+      .normalize();
+    expect(palmDirection.y).toBeGreaterThan(0.99);
+    const index1 = root.getObjectByName("mixamorig:LeftHandIndex1")!;
+    const index2 = root.getObjectByName("mixamorig:LeftHandIndex2")!;
+    expect(
+      index2
+        .getWorldPosition(new THREE.Vector3())
+        .sub(index1.getWorldPosition(new THREE.Vector3()))
+        .normalize().x,
+    ).toBeGreaterThan(0.99);
+  });
+
+  it("associates geometrically nearest left and right wrists despite result order", () => {
+    const posePoints = structuredClone(points);
+    posePoints[15] = { x: 0.2, y: 0.5, z: 0, visibility: 1 };
+    posePoints[16] = { x: 0.8, y: 0.5, z: 0, visibility: 1 };
+    const raw = (x: number, label: "Left" | "Right") => ({
+      landmarks: Array.from({ length: 21 }, (_, i) => ({
+        x: x + i * 0.003,
+        y: 0.5,
+        z: 0,
+        visibility: 1,
+      })),
+      worldLandmarks: Array.from({ length: 21 }, (_, i) => ({
+        x: i * 0.01,
+        y: 0,
+        z: 0,
+        visibility: 1,
+      })),
+      handedness: [
+        { score: 0.98, categoryName: label, index: 0, displayName: label },
+      ],
+    });
+    const matched = associateHands(
+      [raw(0.8, "Left"), raw(0.2, "Right")],
+      posePoints,
+      false,
+    );
+    expect(matched.left?.landmarks[0].x).toBeCloseTo(0.2);
+    expect(matched.right?.landmarks[0].x).toBeCloseTo(0.8);
+
+    posePoints[15].x = 0.4;
+    posePoints[16].x = 0.6;
+    const overlapping = associateHands(
+      [raw(0.49, "Left"), raw(0.29, "Right")],
+      posePoints,
+      false,
+    );
+    expect(overlapping.left?.landmarks[0].x).toBeCloseTo(0.29);
+    expect(overlapping.right?.landmarks[0].x).toBeCloseTo(0.49);
+  });
+
+  it("keeps fingers at rest and falls back to pose palm rotation at low confidence", () => {
+    const { root, hand } = makeHand("Right");
+    const rest = captureRestPose(root);
+    const p: PoseGuidance = structuredClone(pose);
+    p.worldLandmarks[16] = { x: 0, y: 0, z: 0, visibility: 1 };
+    p.worldLandmarks[18] = p.worldLandmarks[20] = {
+      x: 0,
+      y: -1,
+      z: 0,
+      visibility: 1,
+    };
+    p.hands = { right: detectedHand("right", 0.4) };
+    retargetSkeleton(root, p, rest);
+    expect(
+      Math.abs(hand.quaternion.dot(rest.get(hand.name)!.localQuaternion)),
+    ).toBeLessThan(0.99);
+    const finger = root.getObjectByName("mixamorig:RightHandIndex1")!;
+    expect(
+      Math.abs(finger.quaternion.dot(rest.get(finger.name)!.localQuaternion)),
+    ).toBeCloseTo(1);
   });
 });
 
