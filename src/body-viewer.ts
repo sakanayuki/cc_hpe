@@ -70,6 +70,7 @@ export type BodyProportions = {
   armLength: number;
   legLength: number;
 };
+export type HipFacing = "front" | "back";
 export type JointCorrection = {
   rotation: THREE.Euler;
   /** Translation in the bone's local (parent) coordinate system. */
@@ -684,6 +685,7 @@ export function retargetSkeleton(
   pose: PoseGuidance,
   rest: Map<string, RestBone>,
   depthScale = 1,
+  hipFacing: HipFacing = "front",
 ): RetargetReport {
   const report: RetargetReport = {
     appliedBones: 0,
@@ -840,6 +842,31 @@ export function retargetSkeleton(
     model.updateWorldMatrix(true, true);
     report.appliedBones++;
   }
+  // Apply the facing choice exactly once, at the top of the torso hierarchy.
+  // At this point all local rotations were rebuilt from `rest`, so repeated
+  // retargets cannot accumulate this half-turn. Every descendant inherits it
+  // without receiving an additional local rotation of its own.
+  if (hipFacing === "back") {
+    const hips = model.getObjectByName("mixamorig:Hips");
+    if (hips) {
+      const spine = model.getObjectByName("mixamorig:Spine");
+      const torsoUp = spine
+        ? spine
+            .getWorldPosition(new THREE.Vector3())
+            .sub(hips.getWorldPosition(new THREE.Vector3()))
+            .normalize()
+        : new THREE.Vector3(0, 1, 0).applyQuaternion(
+            hips.getWorldQuaternion(new THREE.Quaternion()),
+          );
+      const hipsWorld = hips.getWorldQuaternion(new THREE.Quaternion());
+      const localTorsoUp = torsoUp
+        .applyQuaternion(hipsWorld.invert())
+        .normalize();
+      hips.quaternion.multiply(
+        new THREE.Quaternion().setFromAxisAngle(localTorsoUp, Math.PI),
+      );
+    }
+  }
   model.updateWorldMatrix(true, true);
   return report;
 }
@@ -861,6 +888,7 @@ export class BodyViewer {
   private proportions: BodyProportions = { ...DEFAULT_PROPORTIONS };
   private selected: JointId = "hips";
   private depthScale = 1;
+  private hipFacing: HipFacing = "front";
   private imageSize?: Size;
   constructor(
     private host: HTMLElement,
@@ -927,6 +955,7 @@ export class BodyViewer {
       this.pose,
       this.rest,
       this.depthScale,
+      this.hipFacing,
     );
     for (const r of RULES) {
       const bone = this.model.getObjectByName(r.bone);
@@ -1009,6 +1038,11 @@ export class BodyViewer {
     this.depthScale = v;
     this.retarget();
     this.updateImageAlignment();
+  }
+  setHipFacing(value: HipFacing) {
+    if (this.hipFacing === value) return;
+    this.hipFacing = value;
+    this.rebuildModel();
   }
   setBodyWidth(v: number) {
     this.proportions.width = v;
